@@ -314,7 +314,11 @@
           <input type="text" id="workItem" placeholder="e.g. 51206" oninput="updatePreview()">
         </div>
         <div class="form-group full">
-          <label>Enhancement Title</label>
+          <label>Work Item Type</label>
+          <input type="text" id="wiType" placeholder="e.g. Enhancement, Defect" value="Enhancement" oninput="updatePreview()">
+        </div>
+        <div class="form-group full">
+          <label>Work Item Title</label>
           <input type="text" id="enhTitle" placeholder="e.g. Routine Dosimetry Details" oninput="updatePreview()">
         </div>
         <div class="form-group full">
@@ -584,6 +588,7 @@
       : '';
     return {
       work_item: document.getElementById('workItem').value.trim(),
+      work_item_type: document.getElementById('wiType').value.trim() || 'Enhancement',
       enhancement_title: document.getElementById('enhTitle').value.trim(),
       project_solution: document.getElementById('projectSolution').value.trim(),
       prepared_by: document.getElementById('preparedBy').value.trim(),
@@ -652,10 +657,11 @@
 
   function renderDocHeader(h) {
     const wi = h.work_item || '______';
+    const type = h.work_item_type || 'Enhancement';
     const title = h.enhancement_title || '';
     const enhLine = title
-      ? '<span class="tdd-enh-link">Enhancement ' + esc(wi) + '</span>: ' + esc(title)
-      : '<span class="tdd-enh-link">Enhancement ' + esc(wi) + '</span>';
+      ? '<span class="tdd-enh-link">' + esc(type) + ' ' + esc(wi) + '</span>: ' + esc(title)
+      : '<span class="tdd-enh-link">' + esc(type) + ' ' + esc(wi) + '</span>';
 
     return `
       <div class="tdd-title-bar">Technical Design Document</div>
@@ -720,10 +726,11 @@
     const securityObjects = objects.filter(o => o.type === 'security');
 
     let html = renderDocHeader(h);
+    const type = h.work_item_type || 'Enhancement';
     html += '<div class="tdd-doc-body">';
     html += '<div class="word-h1">1.&nbsp; Technical Design Planning</div>' +
       '<div class="word-h2">Overview</div>' +
-      '<div class="word-p">This document is created to develop Enhancement ' + (h.work_item || '______') + ': ' + (h.enhancement_title || '') + '</div>' +
+      '<div class="word-p">This document is created to develop ' + esc(type) + ' ' + (h.work_item || '______') + ': ' + (h.enhancement_title || '') + '</div>' +
       '<div class="word-h1">2.&nbsp; Functional Requirement</div>' +
       '<div class="word-p">Please refer VSTS for functional requirement</div>' +
       '<div class="word-h1">3.&nbsp; Visual Studio Project</div>' +

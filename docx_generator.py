@@ -220,10 +220,11 @@ def add_cover_title_bar(doc):
 
 def add_cover_enhancement_line(doc, header):
     wi = header.get('work_item', '')
+    type = header.get('work_item_type', 'Enhancement')
     title = header.get('enhancement_title', '')
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run_link = p.add_run(f'Enhancement {wi}' if wi else 'Enhancement')
+    run_link = p.add_run(f'{type} {wi}' if wi else type)
     _style_run(run_link, size=11, color_rgb=RGBColor(0x05, 0x63, 0xC1))
     run_link.underline = True
     if title:
@@ -353,8 +354,43 @@ def add_cover_page(doc, header):
     )
 
 
+def add_table_of_contents(doc):
+    doc.add_page_break()
+    p = doc.add_paragraph()
+    run = p.add_run("Table of Contents")
+    _style_run(run, size=14, bold=True, color_rgb=RGBColor(0x1F, 0x49, 0x7D))
+    p.paragraph_format.space_after = Pt(14)
+    
+    paragraph = doc.add_paragraph()
+    run = paragraph.add_run()
+    fldChar1 = OxmlElement('w:fldChar')
+    fldChar1.set(qn('w:fldCharType'), 'begin')
+    
+    instrText = OxmlElement('w:instrText')
+    instrText.set(qn('xml:space'), 'preserve')
+    instrText.text = 'TOC \\o "1-3" \\h \\z \\u'
+    
+    fldChar2 = OxmlElement('w:fldChar')
+    fldChar2.set(qn('w:fldCharType'), 'separate')
+    
+    fldChar3 = OxmlElement('w:fldChar')
+    fldChar3.set(qn('w:fldCharType'), 'end')
+    
+    r = run._element
+    r.append(fldChar1)
+    r.append(instrText)
+    r.append(fldChar2)
+    r.append(fldChar3)
+    
+    doc.add_page_break()
+
 def generate_tdd_docx(header, objects):
     doc = Document()
+
+    # Force update fields upon opening (critical for TOC)
+    update_fields = OxmlElement('w:updateFields')
+    update_fields.set(qn('w:val'), 'true')
+    doc.settings.element.append(update_fields)
 
     # Set Default Font
     style = doc.styles['Normal']
@@ -371,13 +407,15 @@ def generate_tdd_docx(header, objects):
 
     add_page_header(doc)
     add_cover_page(doc, header)
+    add_table_of_contents(doc)
 
     # ── SECTION 1: Technical Design Planning ──
     add_section_heading(doc, '1.  Technical Design Planning', 1)
     add_section_heading(doc, 'Overview', 2)
     wi_num = header.get('work_item', '')
+    wi_type = header.get('work_item_type', 'Enhancement')
     p = doc.add_paragraph()
-    run = p.add_run(f'This document is created to develop Enhancement {wi_num}: ')
+    run = p.add_run(f'This document is created to develop {wi_type} {wi_num}: ')
     _style_run(run)
     run2 = p.add_run(header.get('enhancement_title', ''))
     _style_run(run2)

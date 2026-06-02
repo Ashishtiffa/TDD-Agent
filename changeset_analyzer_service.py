@@ -1,4 +1,5 @@
 import os
+import re
 from azure_devops_service import AzureDevOpsService
 from object_type_detector import ObjectTypeDetector
 from typing import List, Dict, Optional
@@ -28,6 +29,24 @@ class ChangesetAnalyzerService:
         # Step 1: Get Changeset Details
         details = self.azure_service.get_changeset_details(changeset_id)
         
+        # Parse Comment for Work Item ID
+        comment = details.get('comment', '')
+        wi_match = re.search(r'WI\s*(\d+)', comment, re.IGNORECASE)
+        
+        work_item_id = None
+        work_item_type = "Enhancement"
+        work_item_title = comment
+
+        if wi_match:
+            work_item_id = int(wi_match.group(1))
+            try:
+                wi_details = self.azure_service.get_work_item_details(work_item_id)
+                fields = wi_details.get('fields', {})
+                work_item_type = fields.get('System.WorkItemType', 'Enhancement')
+                work_item_title = fields.get('System.Title', comment)
+            except Exception as e:
+                print(f"Failed to fetch work item details for {work_item_id}: {e}")
+        
         # Step 2: Get Changed Objects
         changes = self.azure_service.get_changeset_changes(changeset_id)
         
@@ -35,7 +54,10 @@ class ChangesetAnalyzerService:
             "changesetId": details.get('changesetId'),
             "author": details.get('author', {}).get('displayName'),
             "date": details.get('createdDate'),
-            "comment": details.get('comment'),
+            "comment": comment,
+            "workItemId": work_item_id,
+            "workItemType": work_item_type,
+            "workItemTitle": work_item_title,
             "objects": []
         }
 

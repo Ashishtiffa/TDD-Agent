@@ -61,3 +61,8 @@ class AzureDevOpsService:
         
         response.raise_for_status()
         return response.text
+
+    def get_work_item_details(self, work_item_id: int) -> Dict:
+        url = f"https://dev.azure.com/{self.org}/{self.project}/_apis/wit/workitems/{work_item_id}?$expand=relations&api-version=7.1"
+        response = requests.get(url, headers=self.auth_header)
+        return self._handle_response(response)
