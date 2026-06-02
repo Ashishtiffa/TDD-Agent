@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TDD Agent — D365</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3250;
+    --accent: #4f8ef7;
+    --accent2: #7c5cbf;
+    --success: #3ecf8e;
+    --warning: #f6a623;
+    --danger: #f05252;
+    --text: #e2e8f0;
+    --text2: #8892a4;
+    --text3: #4a5268;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'Hitachi Sans', 'IBM Plex Sans', sans-serif;
+    --tdd-blue: #1a4f8a;
+    --tdd-blue-light: #deeaf1;
+    --tdd-header: #bdd7ee;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; height: 52px; background: var(--surface);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .topbar-logo { font-family: var(--mono); font-size: 13px; color: var(--accent); letter-spacing: 0.05em; }
+  .topbar-logo span { color: var(--text2); }
+  .btn-generate {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 8px 18px; font-family: var(--sans); font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s; letter-spacing: 0.02em;
+  }
+  .btn-generate:hover { background: #3a7df6; transform: translateY(-1px); }
+  .btn-generate:disabled { background: var(--text3); cursor: not-allowed; transform: none; }
+
+  /* Main layout */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* Left panel — input */
+  .panel-left {
+    width: 460px; flex-shrink: 0; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border); overflow-y: auto;
+  }
+
+  /* Right panel — preview */
+  .panel-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Section blocks */
+  .section { border-bottom: 1px solid var(--border); padding: 18px 20px; }
+  .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); margin-bottom: 14px; }
+
+  /* Header form */
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .form-group { display: flex; flex-direction: column; gap: 5px; }
+  .form-group.full { grid-column: 1 / -1; }
+  label { font-size: 11px; color: var(--text2); font-weight: 500; }
+  input[type=text] {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+    color: var(--text); font-family: var(--sans); font-size: 12px;
+    padding: 7px 10px; outline: none; transition: border-color 0.15s;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+
+  /* Object adder */
+  .object-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .select-styled {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+    color: var(--text); font-family: var(--sans); font-size: 12px;
+    padding: 7px 10px; outline: none; cursor: pointer; flex: 1;
+  }
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+  .toggle-label { font-size: 11px; color: var(--text2); white-space: nowrap; }
+  .toggle {
+    position: relative; width: 36px; height: 20px; flex-shrink: 0;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute; inset: 0; background: var(--border); border-radius: 20px;
+    cursor: pointer; transition: 0.2s;
+  }
+  .toggle-slider:before {
+    content: ''; position: absolute; width: 14px; height: 14px;
+    left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s;
+  }
+  .toggle input:checked + .toggle-slider { background: var(--success); }
+  .toggle input:checked + .toggle-slider:before { transform: translateX(16px); }
+
+  .code-area-wrap { display: grid; gap: 10px; }
+  .code-area-wrap.two-col { grid-template-columns: 1fr 1fr; }
+  .code-area-wrap.one-col { grid-template-columns: 1fr; }
+  .code-box { display: flex; flex-direction: column; gap: 5px; }
+  .code-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+  .code-label.old { color: #f05252; }
+  .code-label.new { color: var(--success); }
+  .code-label.single { color: var(--accent); }
+  textarea {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+    color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 1.5;
+    padding: 10px; resize: vertical; outline: none; min-height: 160px;
+    transition: border-color 0.15s;
+  }
+  textarea:focus { border-color: var(--accent); }
+
+  .name-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 10px; }
+  .name-row .form-group { flex: 1; }
+
+  .btn-analyze {
+    background: transparent; border: 1px solid var(--accent); color: var(--accent);
+    border-radius: 5px; padding: 7px 14px; font-family: var(--sans); font-size: 12px;
+    font-weight: 500; cursor: pointer; white-space: nowrap; transition: all 0.15s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .btn-analyze:hover { background: var(--accent); color: #fff; }
+  .btn-analyze:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-analyze .spinner { display: none; width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; }
+  .btn-analyze.loading .spinner { display: inline-block; }
+  .btn-analyze.loading .btn-text { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Changeset section */
+  .changeset-row { display: flex; gap: 8px; align-items: flex-end; }
+  .changeset-row .form-group { flex: 1; }
+
+  /* Object list */
+  .object-list { padding: 12px 20px; display: flex; flex-direction: column; gap: 6px; }
+  .object-pill {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; transition: border-color 0.15s;
+  }
+  .object-pill:hover { border-color: var(--accent); }
+  .pill-left { display: flex; align-items: center; gap: 8px; }
+  .pill-badge {
+    font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 2px 7px; border-radius: 3px;
+  }
+  .badge-class { background: rgba(124,92,191,0.2); color: var(--accent2); }
+  .badge-table { background: rgba(246,166,35,0.15); color: var(--warning); }
+  .badge-form { background: rgba(62,207,142,0.15); color: var(--success); }
+  .badge-view { background: rgba(79,142,247,0.15); color: var(--accent); }
+  .badge-edt { background: rgba(79, 142, 247, 0.15); color: #e2e8f0; }
+  .pill-name { color: var(--text); font-family: var(--mono); font-size: 11px; }
+  .pill-delete {
+    background: none; border: none; color: var(--text3); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 0 2px; transition: color 0.15s;
+  }
+  .pill-delete:hover { color: var(--danger); }
+
+  /* Preview panel */
+  .preview-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  .preview-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); }
+  .preview-count { font-size: 11px; color: var(--text3); }
+  .preview-scroll { flex: 1; overflow-y: auto; padding: 24px; background: #e8e8e8; }
+
+  /* Word document simulation */
+  .word-doc {
+    background: #fff; color: #000; max-width: 816px; margin: 0 auto;
+    padding: 48px 56px 72px; box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    font-family: 'Hitachi Sans', Calibri, Arial, Helvetica, sans-serif; font-size: 11pt; line-height: 1.35;
+    min-height: 900px;
+  }
+
+  /* Cover page header (matches TDD Word template) */
+  .tdd-title-bar {
+    background: #d9d9d9;
+    text-align: center;
+    font-size: 16pt;
+    font-weight: 700;
+    color: #000;
+    padding: 10px 12px;
+    margin: 0 0 14px;
+    width: 100%;
+  }
+  .tdd-enhancement-line {
+    text-align: left;
+    font-size: 11pt;
+    margin: 0 0 22px;
+    line-height: 1.4;
+    color: #000;
+  }
+  .tdd-enh-link {
+    color: #0563c1;
+    text-decoration: underline;
+    cursor: default;
+  }
+  .tdd-meta-stack { margin: 0 0 28px; }
+  .tdd-client-name {
+    font-size: 11pt;
+    font-weight: 700;
+    margin: 0 0 14px;
+    color: #000;
+  }
+  .tdd-meta-item { margin: 0 0 12px; }
+  .tdd-meta-label {
+    font-size: 11pt;
+    font-weight: 400;
+    color: #000;
+    margin: 0 0 2px;
+  }
+  .tdd-meta-value {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #000;
+  }
+  .tdd-table-heading {
+    font-size: 11pt;
+    font-weight: 700;
+    margin: 0 0 6px;
+    color: #000;
+  }
+  .tdd-black-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 22px;
+    font-size: 11pt;
+  }
+  .tdd-black-table th,
+  .tdd-black-table td {
+    border: 1px solid #000;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .tdd-black-table th {
+    background: #000;
+    color: #fff;
+    font-weight: 700;
+  }
+  .tdd-black-table td {
+    background: #fff;
+    color: #000;
+    font-weight: 400;
+  }
+  .tdd-black-table tr.tdd-revision-row td {
+    background: #ddebf7;
+  }
+  .tdd-doc-body { margin-top: 8px; }
+
+  .word-h1 { font-size: 13pt; font-weight: bold; color: #1a4f8a; margin: 20px 0 8px; padding-bottom: 3px; border-bottom: 1px solid #1a4f8a; }
+  .word-h2 { font-size: 11pt; font-weight: bold; color: #1a4f8a; margin: 14px 0 6px; font-style: italic; }
+  .word-h3 { font-size: 11pt; font-weight: bold; color: #1a4f8a; text-decoration: underline; margin: 12px 0 5px; cursor: pointer; }
+  .word-p { font-size: 10pt; margin: 4px 0; }
+  .word-bold { font-weight: bold; font-size: 10pt; }
+  .word-table { width: 100%; border-collapse: collapse; margin: 6px 0 12px; font-size: 10pt; }
+  .word-table th { background: #bdd7ee; font-weight: bold; padding: 5px 8px; border: 1px solid #9dc3e6; text-align: left; }
+  .word-table td { padding: 4px 8px; border: 1px solid #d9d9d9; }
+  .word-table tr:nth-child(even) td { background: #f5f9fd; }
+  .word-ax-table { width: 100%; border-collapse: collapse; margin: 4px 0 14px; font-size: 10pt; }
+  .word-ax-table th, .word-ax-table td { border: 1px solid #000; padding: 5px 8px; text-align: left; vertical-align: top; }
+  .word-ax-table th { font-weight: bold; background: #bdd7ee; }
+  .word-table-block { margin-bottom: 18px; }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; background: var(--success);
+    color: #fff; padding: 10px 18px; border-radius: 6px; font-size: 13px;
+    transform: translateY(60px); opacity: 0; transition: all 0.25s; z-index: 100;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+
+  .divider { height: 1px; background: var(--border); margin: 0; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-logo">TDD<span>agent</span> // D365</div>
+  <button class="btn-generate" id="btnGenerate" onclick="generateDoc()" disabled>⬇ Generate Word Doc</button>
+</div>
+
+<div class="main">
+  <!-- LEFT PANEL -->
+  <div class="panel-left">
+
+    <!-- Changeset Automation section -->
+    <div class="section" style="background: rgba(79, 142, 247, 0.05);">
+        <div class="section-title" style="color: var(--accent);">Changeset Automation</div>
+        <div class="changeset-row">
+          <div class="form-group">
+            <label>Changeset ID</label>
+            <input type="text" id="changesetId" placeholder="e.g. 10736">
+          </div>
+          <button class="btn-analyze" id="btnAnalyzeChangeset" onclick="analyzeChangeset()">
+            <div class="spinner"></div>
+            <span class="btn-text">🚀 Generate TDD from Changeset</span>
+          </button>
+        </div>
+        <div style="font-size: 10px; color: var(--text3); margin-top: 8px;">
+            This will fetch changed objects, detect types, and extract summaries automatically.
+        </div>
+    </div>
+
+    <!-- Header Info -->
+    <div class="section">
+      <div class="section-title">Document Header</div>
+      <div class="form-grid">
+        <div class="form-group full">
+          <label>Work Item Number</label>
+          <input type="text" id="workItem" placeholder="e.g. 51206" oninput="updatePreview()">
+        </div>
+        <div class="form-group full">
+          <label>Enhancement Title</label>
+          <input type="text" id="enhTitle" placeholder="e.g. Routine Dosimetry Details" oninput="updatePreview()">
+        </div>
+        <div class="form-group full">
+          <label>Project Solution Name</label>
+          <input type="text" id="projectSolution" placeholder="e.g. HS_HG_51206_RoutineDosimetryDetails.rnrproj" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Prepared By</label>
+          <input type="text" id="preparedBy" placeholder="Your name" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Version / Update</label>
+          <input type="text" id="version" placeholder="e.g. Update 64" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Client / Organization</label>
+          <input type="text" id="clientName" placeholder="Hitachi" value="Hitachi" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Project</label>
+          <input type="text" id="project" placeholder="Hitachi - Dynamics 365" value="Hitachi - Dynamics 365" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Authored By (Person)</label>
+          <input type="text" id="authoredPerson" placeholder="e.g. Ashish" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Revision Date</label>
+          <input type="text" id="docDate" placeholder="e.g. 11 May 2026" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Revision Editor</label>
+          <input type="text" id="revisionEditor" placeholder="Optional" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label>Sections Revised</label>
+          <input type="text" id="sectionsRevised" placeholder="Initial" value="Initial" oninput="updatePreview()">
+        </div>
+        <div class="form-group full">
+          <label>Revision Description</label>
+          <input type="text" id="revisionDesc" placeholder="Initiation" value="Initiation" oninput="updatePreview()">
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Object (Manual Fallback) -->
+    <details class="section">
+      <summary class="section-title" style="cursor: pointer; display: list-item;">Manual Object Entry (Fallback)</summary>
+      <div style="margin-top: 14px;">
+        <div class="object-controls">
+            <select class="select-styled" id="objectType" onchange="onTypeChange()">
+            <option value="class">Class</option>
+            <option value="table">Table</option>
+            <option value="edt">EDT</option>
+            <option value="form">Form</option>
+            <option value="view">View</option>
+            <option value="services">Services</option>
+            <option value="security">Security</option>
+            </select>
+            <div class="toggle-wrap">
+            <span class="toggle-label">New object</span>
+            <label class="toggle">
+                <input type="checkbox" id="isNew" onchange="onNewToggle()">
+                <span class="toggle-slider"></span>
+            </label>
+            </div>
+        </div>
+
+        <div class="name-row">
+            <div class="form-group">
+            <label>Object Name (optional — AI will detect)</label>
+            <input type="text" id="objectName" placeholder="e.g. HSIrradiationLoadingUnloadingHelper">
+            </div>
+        </div>
+
+        <div class="code-area-wrap two-col" id="codeWrap">
+            <div class="code-box">
+            <div class="code-label old">◀ Old Code / XML</div>
+            <textarea id="oldCode" placeholder="Paste old code or XML here (left side of diff)..."></textarea>
+            </div>
+            <div class="code-box">
+            <div class="code-label new">▶ New Code / XML</div>
+            <textarea id="newCode" placeholder="Paste new code or XML here (right side of diff)..."></textarea>
+            </div>
+        </div>
+
+        <div style="margin-top: 12px;">
+            <button class="btn-analyze" id="btnAnalyze" onclick="analyzeObject()">
+            <div class="spinner"></div>
+            <span class="btn-text">⚡ Analyse Object</span>
+            </button>
+        </div>
+      </div>
+    </details>
+
+    <!-- Added Objects List -->
+    <div class="object-list" id="objectList"></div>
+
+  </div>
+
+  <!-- RIGHT PANEL — Preview -->
+  <div class="panel-right">
+    <div class="preview-topbar">
+      <div class="preview-title">Document Preview</div>
+      <div class="preview-count" id="previewCount">0 objects added</div>
+    </div>
+    <div class="preview-scroll">
+      <div class="word-doc" id="wordDoc"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  let objects = [];
+
+  function onNewToggle() {
+    const isNew = document.getElementById('isNew').checked;
+    const wrap = document.getElementById('codeWrap');
+    if (isNew) {
+      wrap.className = 'code-area-wrap one-col';
+      wrap.innerHTML = `
+        <div class="code-box">
+          <div class="code-label single">▶ New Code / XML</div>
+          <textarea id="newCode" placeholder="Paste the new object code or XML here..."></textarea>
+        </div>`;
+    } else {
+      wrap.className = 'code-area-wrap two-col';
+      wrap.innerHTML = `
+        <div class="code-box">
+          <div class="code-label old">◀ Old Code / XML</div>
+          <textarea id="oldCode" placeholder="Paste old code or XML here (left side of diff)..."></textarea>
+        </div>
+        <div class="code-box">
+          <div class="code-label new">▶ New Code / XML</div>
+          <textarea id="newCode" placeholder="Paste new code or XML here (right side of diff)..."></textarea>
+        </div>`;
+    }
+  }
+
+  function onTypeChange() {}
+
+  async function analyzeChangeset() {
+    const btn = document.getElementById('btnAnalyzeChangeset');
+    const changesetId = document.getElementById('changesetId').value;
+    if (!changesetId.trim()) { showToast('Please enter a Changeset ID', 'error'); return; }
+
+    btn.classList.add('loading');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/analyze-changeset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changeset_id: changesetId })
+      });
+      const data = await res.json();
+      
+      if (data.error) {
+        showToast('Error: ' + data.error, 'error');
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        return;
+      }
+
+      // Populate header info
+      const comment = data.comment || '';
+      const wiMatch = comment.match(/WI\s*(\d+)/i);
+      document.getElementById('workItem').value = wiMatch ? wiMatch[1] : data.changesetId;
+      
+      document.getElementById('preparedBy').value = data.author;
+      document.getElementById('authoredPerson').value = data.author;
+      document.getElementById('enhTitle').value = comment;
+      
+      if (data.date) {
+        const date = new Date(data.date);
+        document.getElementById('docDate').value = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+      }
+
+      // Add objects
+      objects = data.objects;
+      renderObjectList();
+      updatePreview();
+      
+      showToast('✓ Changeset ' + data.changesetId + ' analyzed. ' + objects.length + ' objects found.');
+      document.getElementById('btnGenerate').disabled = objects.length === 0;
+    } catch(e) {
+      showToast('Error analysing changeset. Check console.', 'error');
+      console.error(e);
+    }
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+
+  async function analyzeObject() {
+    const btn = document.getElementById('btnAnalyze');
+    const objectType = document.getElementById('objectType').value;
+    const isNew = document.getElementById('isNew').checked;
+    const objectName = document.getElementById('objectName').value;
+    const newCode = document.getElementById('newCode')?.value || '';
+    const oldCode = document.getElementById('oldCode')?.value || '';
+
+    if (!newCode.trim()) { showToast('Please paste code/XML first', 'error'); return; }
+
+    btn.classList.add('loading');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ object_type: objectType, is_new: isNew, old_code: oldCode, new_code: newCode, object_name: objectName })
+      });
+      const data = await res.json();
+      
+      if (data.error) {
+        showToast('Error: ' + data.error, 'error');
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        return;
+      }
+
+      objects.push(data);
+      renderObjectList();
+      updatePreview();
+      // Clear inputs
+      document.getElementById('objectName').value = '';
+      document.getElementById('newCode').value = '';
+      if (document.getElementById('oldCode')) document.getElementById('oldCode').value = '';
+      showToast('✓ ' + data.name + ' added to document');
+      document.getElementById('btnGenerate').disabled = false;
+    } catch(e) {
+      showToast('Error analysing object. Check console.', 'error');
+      console.error(e);
+    }
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+
+  function deleteObject(i) {
+    objects.splice(i, 1);
+    renderObjectList();
+    updatePreview();
+    if (objects.length === 0) document.getElementById('btnGenerate').disabled = true;
+  }
+
+  function renderObjectList() {
+    const list = document.getElementById('objectList');
+    if (objects.length === 0) { list.innerHTML = ''; return; }
+    list.innerHTML = objects.map((o, i) => `
+      <div class="object-pill">
+        <div class="pill-left">
+          <span class="pill-badge badge-` + o.type + `">` + o.type + `</span>
+          <span class="pill-name">` + o.name + `</span>
+        </div>
+        <button class="pill-delete" onclick="deleteObject(` + i + `)">×</button>
+      </div>
+    `).join('');
+    document.getElementById('previewCount').textContent = objects.length + ' object' + (objects.length !== 1 ? 's' : '') + ' added';
+  }
+
+  function getHeader() {
+    const versionRaw = document.getElementById('version').value.trim();
+    const versionDisplay = versionRaw
+      ? (versionRaw.toLowerCase().startsWith('dynamics 365') ? versionRaw : 'Dynamics 365 - ' + versionRaw)
+      : '';
+    return {
+      work_item: document.getElementById('workItem').value.trim(),
+      enhancement_title: document.getElementById('enhTitle').value.trim(),
+      project_solution: document.getElementById('projectSolution').value.trim(),
+      prepared_by: document.getElementById('preparedBy').value.trim(),
+      version: versionDisplay,
+      date: document.getElementById('docDate').value.trim(),
+      project: document.getElementById('project').value.trim() || 'Hitachi - Dynamics 365',
+      client_name: document.getElementById('clientName').value.trim() || 'Hitachi',
+      authored_org: document.getElementById('clientName').value.trim() || 'Hitachi',
+      authored_person: document.getElementById('authoredPerson').value.trim(),
+      revision_editor: document.getElementById('revisionEditor').value.trim(),
+      sections_revised: document.getElementById('sectionsRevised').value.trim() || 'Initial',
+      revision_desc: document.getElementById('revisionDesc').value.trim() || 'Initiation'
+    };
+  }
+
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function renderAxSubTable(heading, headers, rows) {
+    if (!rows || !rows.length) return '';
+    let body = rows.map(row =>
+      '<tr>' + row.map(cell => '<td>' + esc(cell) + '</td>').join('') + '</tr>'
+    ).join('');
+    return `
+      <div class="word-p word-bold" style="margin-top:10px">` + esc(heading) + `</div>
+      <table class="word-ax-table">
+        <tr>` + headers.map(h => '<th>' + esc(h) + '</th>').join('') + `</tr>
+        ` + body + `
+      </table>`;
+  }
+
+  function renderAxTable(t) {
+    let html = '<div class="word-table-block">';
+    html += '<div class="word-h3">' + esc(t.name || 'Table') + '</div>';
+    if (t.description) {
+      html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(t.description) + '</div>';
+    }
+    if (t.fields && t.fields.length) {
+      html += renderAxSubTable('Fields:', ['Field Name', 'Type', 'EDT'],
+        t.fields.map(f => [f.name, f.type, f.edt]));
+    }
+    if (t.field_groups && t.field_groups.length) {
+      html += renderAxSubTable('Fields Group:', ['Fields Group Name', 'Fields'],
+        t.field_groups.map(g => [g.name, g.fields]));
+    }
+    if (t.indexes && t.indexes.length) {
+      html += renderAxSubTable('Indexes:', ['Index Name', 'Fields'],
+        t.indexes.map(i => [i.name, i.fields]));
+    }
+    if (t.relations && t.relations.length) {
+      html += renderAxSubTable('Relations:', ['Relation name', 'Field', 'Related Table', 'Related Table Field'],
+        t.relations.map(r => [r.name, r.field, r.related_table, r.related_table_field]));
+    }
+    if (t.methods && t.methods.length) {
+      html += renderAxSubTable('Methods:', ['Method Name', 'Description'],
+        t.methods.map(m => [m.name, m.description]));
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderDocHeader(h) {
+    const wi = h.work_item || '______';
+    const title = h.enhancement_title || '';
+    const enhLine = title
+      ? '<span class="tdd-enh-link">Enhancement ' + esc(wi) + '</span>: ' + esc(title)
+      : '<span class="tdd-enh-link">Enhancement ' + esc(wi) + '</span>';
+
+    return `
+      <div class="tdd-title-bar">Technical Design Document</div>
+      <div class="tdd-enhancement-line">` + enhLine + `</div>
+      <div class="tdd-meta-stack">
+        <div class="tdd-client-name">` + esc(h.client_name) + `</div>
+        <div class="tdd-meta-item">
+          <div class="tdd-meta-label">Project</div>
+          <div class="tdd-meta-value">` + esc(h.project) + `</div>
+        </div>
+        <div class="tdd-meta-item">
+          <div class="tdd-meta-label">Prepared by</div>
+          <div class="tdd-meta-value">` + (esc(h.prepared_by) || '&nbsp;') + `</div>
+        </div>
+        <div class="tdd-meta-item">
+          <div class="tdd-meta-label">Version</div>
+          <div class="tdd-meta-value">` + (esc(h.version) || '&nbsp;') + `</div>
+        </div>
+      </div>
+      <div class="tdd-table-heading">Authored By:</div>
+      <table class="tdd-black-table">
+        <thead>
+          <tr><th>Organization</th><th>Person</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>` + esc(h.authored_org) + `</td>
+            <td>` + (esc(h.authored_person) || '&nbsp;') + `</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="tdd-table-heading">Revision and signoff:</div>
+      <table class="tdd-black-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Editor</th>
+            <th>Sections Revised</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="tdd-revision-row">
+            <td>` + (esc(h.date) || '&nbsp;') + `</td>
+            <td>` + (esc(h.revision_editor) || '&nbsp;') + `</td>
+            <td>` + esc(h.sections_revised) + `</td>
+            <td>` + esc(h.revision_desc) + `</td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+  }
+
+  function updatePreview() {
+    const h = getHeader();
+    const forms = objects.filter(o => o.type === 'form');
+    const tables = objects.filter(o => o.type === 'table');
+    const edts = objects.filter(o => o.type === 'edt');
+    const classes = objects.filter(o => o.type === 'class');
+    const views = objects.filter(o => o.type === 'view');
+    const allServices = objects.filter(o => o.type === 'services');
+    const securityObjects = objects.filter(o => o.type === 'security');
+
+    let html = renderDocHeader(h);
+    html += '<div class="tdd-doc-body">';
+    html += '<div class="word-h1">1.&nbsp; Technical Design Planning</div>' +
+      '<div class="word-h2">Overview</div>' +
+      '<div class="word-p">This document is created to develop Enhancement ' + (h.work_item || '______') + ': ' + (h.enhancement_title || '') + '</div>' +
+      '<div class="word-h1">2.&nbsp; Functional Requirement</div>' +
+      '<div class="word-p">Please refer VSTS for functional requirement</div>' +
+      '<div class="word-h1">3.&nbsp; Visual Studio Project</div>' +
+      '<div class="word-p"><span class="word-bold">Project Solutions:</span> ' + (h.project_solution || '') + '</div>';
+
+    if (forms.length > 0) {
+      html += '<div class="word-h1">4.&nbsp; User Interface</div><div class="word-h2">Forms</div>';
+      forms.forEach(f => {
+        html += '<div class="word-h3">' + f.name + '</div>';
+        html += '<div class="word-p"><span class="word-bold">Description:</span> ' + (f.description || '') + '</div>';
+        const p = f.properties || {};
+        if (Object.values(p).some(v => v)) {
+          html += '<div class="word-p word-bold" style="margin-top:8px">Form Details:</div>';
+          html += '<table class="word-table"><tr><th>Property</th><th>Value</th></tr>';
+          if (p.pattern) html += '<tr><td>Pattern</td><td>' + p.pattern + '</td></tr>';
+          if (p.style) html += '<tr><td>Style</td><td>' + p.style + '</td></tr>';
+          if (p.caption) html += '<tr><td>Caption</td><td>' + p.caption + '</td></tr>';
+          if (p.data_source) html += '<tr><td>Data Source</td><td>' + p.data_source + '</td></tr>';
+          html += '</table>';
+        }
+        if (f.added_controls && f.added_controls.length) {
+          html += '<div class="word-p word-bold" style="margin-top:8px">Controls Added:</div>';
+          html += '<table class="word-table"><tr><th>Control Name</th><th>Control Type</th><th>Data Source</th><th>Data Field</th></tr>';
+          f.added_controls.forEach(c => html += '<tr><td>' + (c.name||'') + '</td><td>' + (c.control_type||'') + '</td><td>' + (c.data_source||'') + '</td><td>' + (c.data_field||'') + '</td></tr>');
+          html += '</table>';
+        }
+        if (f.modified_controls && f.modified_controls.length) {
+          html += '<div class="word-p word-bold" style="margin-top:8px">Modified Controls:</div>';
+          html += '<table class="word-table"><tr><th>Control Name</th><th>Control Type</th><th>Data Source</th><th>Data Field</th></tr>';
+          f.modified_controls.forEach(c => html += '<tr><td>' + (c.name||'') + '</td><td>' + (c.control_type||'') + '</td><td>' + (c.data_source||'') + '</td><td>' + (c.data_field||'') + '</td></tr>');
+          html += '</table>';
+        }
+        if (f.methods && f.methods.length) {
+          html += '<div class="word-p word-bold" style="margin-top:8px">Methods:</div>';
+          html += '<table class="word-table"><tr><th>Method Name</th><th>Description</th></tr>';
+          f.methods.forEach(m => html += '<tr><td>' + (m.name||'') + '</td><td>' + (m.description||'') + '</td></tr>');
+          html += '</table>';
+        }
+      });
+    } else {
+      html += '<div class="word-h1">4.&nbsp; User Interface</div><div class="word-h2">Forms</div><div class="word-p" style="color:#aaa;font-style:italic">No forms added yet</div>';
+    }
+
+    if (tables.length > 0 || views.length > 0 || edts.length > 0) {
+      html += '<div class="word-h1">5.&nbsp; Data Dictionary</div>';
+      if (edts.length > 0) {
+        html += '<div class="word-h2">EDT</div>';
+        html += renderAxSubTable('EDT:', ['Name', 'Type', 'Extends'],
+          edts.map(e => [e.name, e.data_type, e.extends]));
+      }
+      if (tables.length > 0) {
+        html += '<div class="word-h2">Tables</div>';
+        tables.forEach(t => { html += renderAxTable(t); });
+      }
+      if (views.length > 0) {
+        html += '<div class="word-h2">Views</div>';
+        views.forEach(v => {
+          html += '<div class="word-h3">' + v.name + '</div>';
+          html += '<div class="word-p"><span class="word-bold">Description:</span> ' + (v.description || '') + '</div>';
+        });
+      }
+    } else {
+      html += '<div class="word-h1">5.&nbsp; Data Dictionary</div><div class="word-h2">Tables</div><div class="word-p" style="color:#aaa;font-style:italic">No tables added yet</div>';
+    }
+
+    if (classes.length > 0) {
+      html += '<div class="word-h1">6.&nbsp; Application Components</div>';
+      html += '<div class="word-p">Following AX Classes/Menus/Action Menu Items created to handle the requirement.</div>';
+      html += '<div class="word-h2">Classes</div>';
+      classes.forEach(c => {
+        html += '<div class="word-h3">' + c.name + '</div>';
+        if (c.methods && c.methods.length) {
+          html += '<table class="word-table"><tr><th>Method</th><th>Description</th></tr>';
+          c.methods.forEach(m => {
+            let desc = m.description || '';
+            if (m.is_new && !desc.toLowerCase().startsWith('added')) desc = 'Added ' + desc;
+            html += '<tr><td>' + (m.name||'') + '</td><td>' + desc + '</td></tr>';
+          });
+          html += '</table>';
+        }
+      });
+    } else {
+      html += '<div class="word-h1">6.&nbsp; Application Components</div><div class="word-h2">Classes</div><div class="word-p" style="color:#aaa;font-style:italic">No classes added yet</div>';
+    }
+
+    if (allServices.length > 0) {
+      html += '<div class="word-h1">7.&nbsp; Services</div>';
+      const sg = allServices.filter(o => o.subtype === 'service_group');
+      if (sg.length > 0) {
+        html += '<div class="word-h2">Service Groups</div>';
+        html += '<table class="word-table"><tr><th>Service Group Name</th><th>Service added under that service group</th></tr>';
+        sg.forEach(o => {
+          const list = o.details ? o.details.map(d => d.name).join(', ') : '';
+          html += '<tr><td>' + esc(o.name) + '</td><td>' + esc(list) + '</td></tr>';
+        });
+        html += '</table>';
+      }
+      const sv = allServices.filter(o => o.subtype === 'service');
+      if (sv.length > 0) {
+        html += '<div class="word-h2">Services</div>';
+        html += '<table class="word-table"><tr><th>Service Name</th><th>Methods</th></tr>';
+        sv.forEach(o => {
+          const list = o.details ? o.details.map(d => d.name).join(', ') : '';
+          html += '<tr><td>' + esc(o.name) + '</td><td>' + esc(list) + '</td></tr>';
+        });
+        html += '</table>';
+      }
+    } else {
+      html += '<div class="word-h1">7.&nbsp; Services</div><div class="word-h2">Service Groups and Services</div><div class="word-p" style="color:#aaa;font-style:italic">No service groups or services added yet</div>';
+    }
+
+    if (securityObjects.length > 0) {
+      html += '<div class="word-h1">8.&nbsp; Security</div><div class="word-h2">Security Privileges</div>';
+      securityObjects.forEach(s => {
+        html += '<div class="word-h3">' + esc(s.name) + ' (' + esc(s.subtype) + ')</div>';
+        html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(s.description) + '</div>';
+        if (s.subtype === 'privilege' && s.permissions && s.permissions.length) {
+          html += '<table class="word-table"><tr><th>Object Name</th><th>Access Level</th></tr>';
+          s.permissions.forEach(p => {
+            html += '<tr><td>' + esc(p.object_name) + '</td><td>' + esc(p.access_level) + '</td></tr>';
+          });
+          html += '</table>';
+        }
+      });
+    } else {
+      html += '<div class="word-h1">8.&nbsp; Security</div><div class="word-h2">Security Privileges</div><div class="word-p" style="color:#aaa;font-style:italic">No security objects added yet</div>';
+    }
+    
+    html += '</div>';
+    document.getElementById('wordDoc').innerHTML = html;
+  }
+
+  async function generateDoc() {
+    const btn = document.getElementById('btnGenerate');
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating...';
+    try {
+      const res = await fetch('/generate-docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ header: getHeader(), objects })
+      });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'TDD_Document.docx'; a.click();
+      showToast('✓ Word document downloaded!');
+    } catch(e) {
+      showToast('Error generating document', 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = '⬇ Generate Word Doc';
+  }
+
+  function showToast(msg, type, duration = 3000) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.background = type === 'error' ? 'var(--danger)' : 'var(--success)';
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), duration);
+  }
+
+  updatePreview();
+</script>
+</body>
+</html>
