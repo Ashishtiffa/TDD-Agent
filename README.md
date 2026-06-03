@@ -20,13 +20,13 @@ Automates D365 Technical Design Document (TDD) generation by directly analyzing 
 
 2. **Install dependencies**:
    ```bash
-   pip install flask python-docx google-genai python-dotenv requests
+   pip install flask python-docx openai python-dotenv requests
    ```
 
 3. **Configure Environment**:
    Create a `.env` file in the root directory (never commit this to Git!):
    ```env
-   GEMINI_API_KEY=your_google_ai_key
+   KIMI_API_KEY=your_kimi_api_key
    AZURE_DEVOPS_ORG=your_org_name
    AZURE_DEVOPS_PROJECT=your_project_name
    AZURE_DEVOPS_PAT=your_personal_access_token

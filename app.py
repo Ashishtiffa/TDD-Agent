@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file
-from google import genai
+from openai import OpenAI
 import json
 import io
 import os
@@ -21,47 +21,33 @@ ado_project = os.environ.get("AZURE_DEVOPS_PROJECT")
 ado_pat = os.environ.get("AZURE_DEVOPS_PAT")
 azure_service = AzureDevOpsService(ado_org, ado_pat, ado_project) if ado_org and ado_pat else None
 
+ENDPOINT = "https://apim-sj-foundry-eastus2.azure-api.net/sj-foundry-eastus2-resource/openai/v1"
+DEPLOYMENT = "Kimi-K2.6-1"
+
 def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
     prompt = build_prompt(object_type, is_new, old_code, new_code, object_name)
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
     
-    # Models confirmed available via ModelService.ListModels
-    models_to_try = [
-        "gemini-2.5-flash", 
-        "gemini-2.0-flash", 
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-flash-latest"
-    ]
-    
-    last_error = None
-    response = None
+    api_key = os.environ.get("KIMI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception("API key not found in .env")
 
-    for model_name in models_to_try:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
-                break
-            except Exception as e:
-                last_error = str(e)
-                # If it's a 404, we should immediately skip to the next model in the list
-                if "404" in last_error:
-                    print(f"Model {model_name} not found (404). Skipping...")
-                    break
-                if "429" in last_error or "503" in last_error:
-                    time.sleep(1)
-                    continue
-                break
-        if response:
-            break
+    client = OpenAI(
+        base_url=ENDPOINT,
+        api_key="unused",  # real auth is the api-key header below
+        default_headers={"api-key": api_key},
+    )
     
-    if not response:
-        raise Exception(f"AI analysis failed: {last_error}")
+    try:
+        completion = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = completion.choices[0].message.content
+    except Exception as e:
+        raise Exception(f"AI analysis failed: {str(e)}")
 
-    raw = response.text
     clean = raw.replace('```json', '').replace('```', '').strip()
     
     try:
