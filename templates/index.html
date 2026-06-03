@@ -311,7 +311,7 @@
       <div class="form-grid">
         <div class="form-group full">
           <label>Work Item Number</label>
-          <input type="text" id="workItem" placeholder="e.g. 51206" oninput="updatePreview()">
+          <input type="text" id="workItem" placeholder="e.g. 51206" oninput="onWorkItemInput()">
         </div>
         <div class="form-group full">
           <label>Work Item Type</label>
@@ -435,6 +435,7 @@
 
 <script>
   let objects = [];
+  let wiFetchTimer = null;
 
   function onNewToggle() {
     const isNew = document.getElementById('isNew').checked;
@@ -461,6 +462,27 @@
   }
 
   function onTypeChange() {}
+
+  async function fetchWorkItemDetails() {
+    const wi = document.getElementById('workItem').value.trim();
+    if (!/^\d+$/.test(wi)) return;
+    try {
+      const res = await fetch(`/work-item/${encodeURIComponent(wi)}`);
+      const data = await res.json();
+      if (data.error) return;
+      if (data.work_item_type) document.getElementById('wiType').value = data.work_item_type;
+      if (data.title) document.getElementById('enhTitle').value = data.title;
+      updatePreview();
+    } catch (e) {
+      // ignore; manual entry still works
+    }
+  }
+
+  function onWorkItemInput() {
+    updatePreview();
+    if (wiFetchTimer) clearTimeout(wiFetchTimer);
+    wiFetchTimer = setTimeout(fetchWorkItemDetails, 450);
+  }
 
   async function analyzeChangeset() {
     const btn = document.getElementById('btnAnalyzeChangeset');
@@ -493,6 +515,7 @@
       document.getElementById('preparedBy').value = data.author;
       document.getElementById('authoredPerson').value = data.author;
       document.getElementById('enhTitle').value = comment;
+      onWorkItemInput();
       
       if (data.date) {
         const date = new Date(data.date);

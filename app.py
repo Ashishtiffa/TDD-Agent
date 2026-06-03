@@ -79,6 +79,23 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
 def index():
     return render_template('index.html')
 
+@app.route('/work-item/<int:work_item_id>')
+def work_item_details(work_item_id: int):
+    if not azure_service:
+        return jsonify({"error": "Azure DevOps credentials not configured in .env"}), 500
+    try:
+        data = azure_service.get_work_item_details(work_item_id)
+        fields = data.get('fields', {}) or {}
+        wi_type = fields.get('System.WorkItemType', '')
+        title = fields.get('System.Title', '')
+        return jsonify({
+            "work_item": str(work_item_id),
+            "work_item_type": wi_type,
+            "title": title,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
