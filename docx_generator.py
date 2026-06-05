@@ -430,6 +430,30 @@ def generate_tdd_docx(header, objects):
     add_section_heading(doc, '3.  Visual Studio Project', 1)
     add_bold_label(doc, 'Project Solutions:', header.get('project_solution', ''))
 
+    # Objects modified — grouped by type
+    type_labels = {
+        'class': 'Class', 'table': 'Table', 'form': 'Form', 'edt': 'EDT',
+        'view': 'View', 'security': 'Security', 'services': 'Services',
+        'enum': 'Enum', 'data_entity': 'Data Entity',
+        'table_extension': 'Table Extension', 'class_extension': 'Class Extension',
+    }
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for obj in objects:
+        grouped[obj.get('type', 'unknown')].append(obj.get('name', ''))
+
+    if grouped:
+        add_section_heading(doc, 'Objects Modified', 2)
+        for obj_type, names in grouped.items():
+            label = type_labels.get(obj_type, obj_type.title())
+            add_bold_label(doc, label + ':')
+            for name in names:
+                p = doc.add_paragraph()
+                p.paragraph_format.left_indent = Inches(0.3)
+                run = p.add_run(name)
+                _style_run(run)
+        doc.add_paragraph()
+
     # ── SECTION 4: User Interface ──
     forms = [o for o in objects if o['type'] == 'form']
     if forms:

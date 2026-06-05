@@ -274,6 +274,16 @@
   .toast.show { transform: translateY(0); opacity: 1; }
 
   .divider { height: 1px; background: var(--border); margin: 0; }
+
+  /* ADO connection status */
+  .ado-status { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 12px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; transition: background 0.2s; }
+  .ado-status.connected .status-dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .ado-status.not-connected .status-dot { background: var(--danger); }
+  .ado-status.checking .status-dot { background: var(--warning); }
+  .ado-status.connected .status-text { color: var(--success); font-weight: 500; }
+  .ado-status.not-connected .status-text { color: var(--text3); }
+  .ado-status.checking .status-text { color: var(--warning); }
 </style>
 </head>
 <body>
@@ -287,9 +297,57 @@
   <!-- LEFT PANEL -->
   <div class="panel-left">
 
-    <!-- Changeset Automation section -->
+    <!-- Azure DevOps Configuration -->
+    <div class="section" style="background: rgba(62,207,142,0.04); border-bottom: 1px solid var(--border);">
+      <div class="section-title">Azure DevOps Connection</div>
+      <div class="ado-status checking" id="adoStatus">
+        <span class="status-dot"></span>
+        <span class="status-text" id="adoStatusText">Checking...</span>
+      </div>
+      <div class="form-grid">
+        <div class="form-group full">
+          <label>Organization</label>
+          <input type="text" id="adoOrg" placeholder="e.g. hts-global-erp">
+        </div>
+        <div class="form-group full">
+          <label>Project</label>
+          <input type="text" id="adoProject" placeholder="e.g. HTS-D365">
+        </div>
+        <div class="form-group full">
+          <label>Personal Access Token (PAT)</label>
+          <input type="password" id="adoPat" placeholder="Paste your PAT here">
+        </div>
+      </div>
+      <div style="margin-top: 10px;">
+        <button class="btn-analyze" id="btnConnectAdo" onclick="connectAdo()">
+          <div class="spinner"></div>
+          <span class="btn-text">🔗 Connect to Azure DevOps</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Work Item Automation (primary) -->
     <div class="section" style="background: rgba(79, 142, 247, 0.05);">
-        <div class="section-title" style="color: var(--accent);">Changeset Automation</div>
+      <div class="section-title" style="color: var(--accent);">Work Item Automation</div>
+      <div class="changeset-row">
+        <div class="form-group">
+          <label>Work Item ID</label>
+          <input type="text" id="workItemIdInput" placeholder="e.g. 98204">
+        </div>
+        <button class="btn-analyze" id="btnAnalyzeWorkItem" onclick="analyzeWorkItem()">
+          <div class="spinner"></div>
+          <span class="btn-text">🚀 Generate TDD from Work Item</span>
+        </button>
+      </div>
+      <div style="font-size: 10px; color: var(--text3); margin-top: 8px;">
+        Fetches all linked changesets, compares baseline vs latest for each object, and generates a complete TDD automatically.
+      </div>
+    </div>
+
+    <!-- Changeset Automation (fallback) -->
+    <details class="section">
+      <summary class="section-title" style="cursor: pointer; display: list-item; color: var(--text3);">Changeset Automation (Fallback)</summary>
+      <div style="margin-top: 12px;">
         <div class="changeset-row">
           <div class="form-group">
             <label>Changeset ID</label>
@@ -301,9 +359,10 @@
           </button>
         </div>
         <div style="font-size: 10px; color: var(--text3); margin-top: 8px;">
-            This will fetch changed objects, detect types, and extract summaries automatically.
+          Analyze a single changeset only (compares against the previous changeset, not Work Item baseline).
         </div>
-    </div>
+      </div>
+    </details>
 
     <!-- Header Info -->
     <div class="section">
@@ -482,6 +541,75 @@
     updatePreview();
     if (wiFetchTimer) clearTimeout(wiFetchTimer);
     wiFetchTimer = setTimeout(fetchWorkItemDetails, 450);
+  }
+
+  async function analyzeWorkItem() {
+    const btn = document.getElementById('btnAnalyzeWorkItem');
+    const workItemId = document.getElementById('workItemIdInput').value.trim();
+    if (!workItemId) { showToast('Please enter a Work Item ID', 'error'); return; }
+
+    btn.classList.add('loading');
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/analyze-workitem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ work_item_id: workItemId })
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        showToast('Error: ' + data.error, 'error');
+        btn.classList.remove('loading');
+        btn.disabled = false;
+        return;
+      }
+
+      // Populate header fields from work item data
+      document.getElementById('workItem').value = data.workItemId || workItemId;
+      if (data.workItemType) document.getElementById('wiType').value = data.workItemType;
+      if (data.workItemTitle) document.getElementById('enhTitle').value = data.workItemTitle;
+      if (data.author) {
+        document.getElementById('preparedBy').value = data.author;
+        document.getElementById('authoredPerson').value = data.author;
+      }
+      if (data.date) {
+        const d = new Date(data.date);
+        document.getElementById('docDate').value = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+      }
+      if (data.project_solution) {
+        document.getElementById('projectSolution').value = data.project_solution;
+      }
+
+      objects = data.objects || [];
+      renderObjectList();
+      updatePreview();
+
+      const csCount = (data.changesets || []).length;
+      const failed = data.failed_objects || [];
+
+      showToast('✓ Work Item ' + data.workItemId + ' analyzed — ' + objects.length + ' object(s) across ' + csCount + ' changeset(s).' + (failed.length ? ' ⚠ ' + failed.length + ' failed (see warning below).' : ''), 'success', 6000);
+      document.getElementById('btnGenerate').disabled = objects.length === 0;
+
+      // Show failed objects warning panel
+      const existingWarn = document.getElementById('failedWarning');
+      if (existingWarn) existingWarn.remove();
+      if (failed.length > 0) {
+        const warn = document.createElement('div');
+        warn.id = 'failedWarning';
+        warn.style.cssText = 'margin: 12px 20px; padding: 12px 14px; background: rgba(240,82,82,0.1); border: 1px solid var(--danger); border-radius: 6px; font-size: 11px;';
+        warn.innerHTML = '<div style="color:var(--danger);font-weight:600;margin-bottom:8px;">⚠ ' + failed.length + ' object(s) failed due to rate limit and were excluded from the document:</div>'
+          + failed.map(f => '<div style="color:var(--text2);padding:2px 0;">• <span style="font-family:var(--mono)">' + f.name + '</span> <span style="color:var(--text3)">(' + f.type + ')</span></div>').join('')
+          + '<div style="color:var(--text3);margin-top:8px;">Re-run the Work Item analysis in ~1 minute to pick these up, or add them manually via the Manual Object Entry section.</div>';
+        document.getElementById('objectList').before(warn);
+      }
+    } catch(e) {
+      showToast('Error analysing work item. Check console.', 'error');
+      console.error(e);
+    }
+    btn.classList.remove('loading');
+    btn.disabled = false;
   }
 
   async function analyzeChangeset() {
@@ -738,6 +866,101 @@
     `;
   }
 
+  // ── Azure DevOps connection ──────────────────────────────────────────────
+  function setAdoStatus(connected, text) {
+    const el = document.getElementById('adoStatus');
+    const txt = document.getElementById('adoStatusText');
+    el.className = 'ado-status ' + (connected ? 'connected' : 'not-connected');
+    txt.textContent = text;
+  }
+
+  async function checkAdoStatus() {
+    try {
+      const res = await fetch('/ado-status');
+      const data = await res.json();
+      if (data.connected) {
+        setAdoStatus(true, 'Connected — ' + data.org + ' / ' + data.project);
+        document.getElementById('adoOrg').value = data.org || '';
+        document.getElementById('adoProject').value = data.project || '';
+      } else {
+        setAdoStatus(false, 'Not Connected');
+        if (data.org)     document.getElementById('adoOrg').value = data.org;
+        if (data.project) document.getElementById('adoProject').value = data.project;
+      }
+    } catch(e) {
+      setAdoStatus(false, 'Not Connected');
+    }
+  }
+
+  async function connectAdo() {
+    const btn = document.getElementById('btnConnectAdo');
+    const org     = document.getElementById('adoOrg').value.trim();
+    const project = document.getElementById('adoProject').value.trim();
+    const pat     = document.getElementById('adoPat').value.trim();
+
+    if (!org || !project || !pat) {
+      showToast('Please fill in Organization, Project and PAT', 'error');
+      return;
+    }
+
+    btn.classList.add('loading');
+    btn.disabled = true;
+    setAdoStatus(false, 'Connecting...');
+    document.getElementById('adoStatus').className = 'ado-status checking';
+
+    try {
+      const res = await fetch('/configure-ado', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org, project, pat })
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        setAdoStatus(false, 'Connection failed — ' + data.error);
+        showToast('Connection failed: ' + data.error, 'error');
+      } else {
+        setAdoStatus(true, 'Connected — ' + data.org + ' / ' + data.project);
+        document.getElementById('adoPat').value = '';
+        showToast('✓ Connected to Azure DevOps — ' + data.org + ' / ' + data.project);
+      }
+    } catch(e) {
+      setAdoStatus(false, 'Connection failed');
+      showToast('Connection failed. Check console.', 'error');
+    }
+
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+
+  // Check connection status on page load
+  checkAdoStatus();
+
+  const TYPE_LABELS = {
+    class: 'Class', table: 'Table', form: 'Form', edt: 'EDT',
+    view: 'View', security: 'Security', services: 'Services',
+    enum: 'Enum', data_entity: 'Data Entity',
+    table_extension: 'Table Extension', class_extension: 'Class Extension'
+  };
+
+  function renderObjectListing(objs) {
+    if (!objs || objs.length === 0) return '';
+    const grouped = {};
+    objs.forEach(o => {
+      const label = TYPE_LABELS[o.type] || o.type;
+      if (!grouped[label]) grouped[label] = [];
+      grouped[label].push(o.name);
+    });
+    let html = '<div class="word-h2" style="margin-top:14px">Objects Modified</div>';
+    Object.entries(grouped).forEach(([label, names]) => {
+      html += '<div class="word-p"><span class="word-bold">' + esc(label) + ':</span></div>';
+      html += '<div style="margin-left:20px;font-size:10pt;line-height:1.8">';
+      names.forEach(n => { html += '<div>' + esc(n) + '</div>'; });
+      html += '</div>';
+    });
+    return html;
+  }
+
   function updatePreview() {
     const h = getHeader();
     const forms = objects.filter(o => o.type === 'form');
@@ -757,7 +980,8 @@
       '<div class="word-h1">2.&nbsp; Functional Requirement</div>' +
       '<div class="word-p">Please refer VSTS for functional requirement</div>' +
       '<div class="word-h1">3.&nbsp; Visual Studio Project</div>' +
-      '<div class="word-p"><span class="word-bold">Project Solutions:</span> ' + (h.project_solution || '') + '</div>';
+      '<div class="word-p"><span class="word-bold">Project Solutions:</span> ' + (h.project_solution || '') + '</div>' +
+      renderObjectListing(objects);
 
     if (forms.length > 0) {
       html += '<div class="word-h1">4.&nbsp; User Interface</div><div class="word-h2">Forms</div>';

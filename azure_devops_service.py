@@ -62,6 +62,13 @@ class AzureDevOpsService:
         response.raise_for_status()
         return response.text
 
+    def test_connection(self) -> Dict:
+        """Lightweight call to verify org, project and PAT are valid."""
+        url = f"https://dev.azure.com/{self.org}/_apis/tfvc/changesets?$top=1&api-version=7.1"
+        response = requests.get(url, headers=self.auth_header)
+        self._handle_response(response)
+        return {"connected": True, "org": self.org, "project": self.project}
+
     def get_work_item_details(self, work_item_id: int) -> Dict:
         url = f"https://dev.azure.com/{self.org}/{self.project}/_apis/wit/workitems/{work_item_id}?$expand=relations&api-version=7.1"
         response = requests.get(url, headers=self.auth_header)
