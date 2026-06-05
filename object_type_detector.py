@@ -9,15 +9,22 @@ class ObjectTypeDetector:
         'AxView': 'view',
         'AxEdt': 'edt',
         'AxEnum': 'enum',
+        'AxQuery': 'query',
         'AxDataEntityView': 'data_entity',
         'AxTableExtension': 'table_extension',
+        'AxFormExtension': 'form_extension',
+        'AxViewExtension': 'view_extension',
+        'AxEdtExtension': 'edt_extension',
+        'AxQueryExtension': 'query_extension',
+        'AxEnumExtension': 'enum_extension',
         'AxClassExtension': 'class_extension',
         'AxSecurityPrivilege': 'security',
         'AxSecurityDuty': 'security',
         'AxSecurityRole': 'security',
         'AxSecurityPolicy': 'security',
         'AxService': 'services',
-        'AxServiceGroup': 'services'
+        'AxServiceGroup': 'services',
+        'AxReport': 'report'
     }
 
     @staticmethod

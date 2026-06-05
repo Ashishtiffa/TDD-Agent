@@ -436,6 +436,10 @@ def generate_tdd_docx(header, objects):
         'view': 'View', 'security': 'Security', 'services': 'Services',
         'enum': 'Enum', 'data_entity': 'Data Entity',
         'table_extension': 'Table Extension', 'class_extension': 'Class Extension',
+        'form_extension': 'Form Extension', 'view_extension': 'View Extension',
+        'edt_extension': 'EDT Extension', 'query_extension': 'Query Extension',
+        'enum_extension': 'Enum Extension',
+        'report': 'Report',
     }
     from collections import defaultdict
     grouped = defaultdict(list)
@@ -455,7 +459,7 @@ def generate_tdd_docx(header, objects):
         doc.add_paragraph()
 
     # ── SECTION 4: User Interface ──
-    forms = [o for o in objects if o['type'] == 'form']
+    forms = [o for o in objects if o['type'] in ('form', 'form_extension')]
     if forms:
         add_section_heading(doc, '4.  User Interface', 1)
         add_section_heading(doc, 'Forms', 2)
@@ -523,13 +527,14 @@ def generate_tdd_docx(header, objects):
                 doc.add_paragraph()
 
     # ── SECTION 5: Data Dictionary ──
-    tables = [o for o in objects if o['type'] == 'table']
-    views = [o for o in objects if o['type'] == 'view']
-    edts = [o for o in objects if o['type'] == 'edt']
-    enums = [o for o in objects if o['type'] == 'enum']
+    tables = [o for o in objects if o['type'] in ('table', 'table_extension')]
+    views = [o for o in objects if o['type'] in ('view', 'view_extension')]
+    edts = [o for o in objects if o['type'] in ('edt', 'edt_extension')]
+    enums = [o for o in objects if o['type'] in ('enum', 'enum_extension')]
     data_entities = [o for o in objects if o['type'] == 'data_entity']
-    
-    if tables or views or edts or enums or data_entities:
+    queries = [o for o in objects if o['type'] in ('query', 'query_extension')]
+
+    if tables or views or edts or enums or data_entities or queries:
         add_section_heading(doc, '5.  Data Dictionary', 1)
 
         if edts:
@@ -543,12 +548,19 @@ def generate_tdd_docx(header, objects):
 
         if enums:
             add_section_heading(doc, 'Base Enums', 2)
-            add_ax_subsection_table(
-                doc,
-                'Enums:',
-                ['Name', 'Description'],
-                [[e.get('name', ''), e.get('description', '')] for e in enums]
-            )
+            for en in enums:
+                add_hyperlink_heading(doc, en.get('name', 'Enum'))
+                if en.get('description'):
+                    add_bold_label(doc, 'Description:', en['description'])
+                values = en.get('values') or []
+                if values:
+                    add_ax_subsection_table(
+                        doc,
+                        'Values:',
+                        ['Enum Name', 'Label'],
+                        [[v.get('name', ''), v.get('label', '')] for v in values]
+                    )
+                doc.add_paragraph()
 
         if tables:
             add_section_heading(doc, 'Tables', 2)
@@ -560,6 +572,38 @@ def generate_tdd_docx(header, objects):
             for view in views:
                 add_hyperlink_heading(doc, view['name'])
                 add_bold_label(doc, 'Description:', view.get('description', ''))
+                data_sources = view.get('data_sources') or []
+                if data_sources:
+                    add_ax_subsection_table(
+                        doc,
+                        'Data Sources:',
+                        ['Data Source', 'Table'],
+                        [[ds.get('name', ''), ds.get('table', '')] for ds in data_sources]
+                    )
+                fields = view.get('fields') or []
+                if fields:
+                    add_ax_subsection_table(
+                        doc,
+                        'Fields:',
+                        ['Field Name', 'Data Source', 'EDT'],
+                        [[f.get('name', ''), f.get('data_source', ''), f.get('edt', '')] for f in fields]
+                    )
+                field_groups = view.get('field_groups') or []
+                if field_groups:
+                    add_ax_subsection_table(
+                        doc,
+                        'Field Groups:',
+                        ['Field Group Name', 'Fields'],
+                        [[g.get('name', ''), g.get('fields', '')] for g in field_groups]
+                    )
+                methods = view.get('methods') or []
+                if methods:
+                    add_ax_subsection_table(
+                        doc,
+                        'Methods:',
+                        ['Method Name', 'Description'],
+                        [[m.get('name', ''), m.get('description', '')] for m in methods]
+                    )
                 doc.add_paragraph()
         
         if data_entities:
@@ -567,10 +611,89 @@ def generate_tdd_docx(header, objects):
             for de in data_entities:
                 add_hyperlink_heading(doc, de['name'])
                 add_bold_label(doc, 'Description:', de.get('description', ''))
+
+                data_sources = de.get('data_sources') or []
+                if data_sources:
+                    add_ax_subsection_table(
+                        doc, 'Data Sources:',
+                        ['Data Source', 'Table', 'Join Type'],
+                        [[ds.get('name',''), ds.get('table',''), ds.get('join_type','')] for ds in data_sources]
+                    )
+
+                fields = de.get('fields') or []
+                if fields:
+                    add_ax_subsection_table(
+                        doc, 'Fields:',
+                        ['Field Name', 'Data Source', 'EDT'],
+                        [[f.get('name',''), f.get('data_source',''), f.get('edt','')] for f in fields]
+                    )
+
+                entity_keys = de.get('entity_keys') or []
+                if entity_keys:
+                    add_ax_subsection_table(
+                        doc, 'Entity Keys:',
+                        ['Key Name', 'Fields'],
+                        [[k.get('name',''), k.get('fields','')] for k in entity_keys]
+                    )
+
+                field_groups = de.get('field_groups') or []
+                if field_groups:
+                    add_ax_subsection_table(
+                        doc, 'Field Groups:',
+                        ['Field Group Name', 'Fields'],
+                        [[g.get('name',''), g.get('fields','')] for g in field_groups]
+                    )
+
+                methods = de.get('methods') or []
+                if methods:
+                    add_ax_subsection_table(
+                        doc, 'Methods:',
+                        ['Method Name', 'Description'],
+                        [[m.get('name',''), m.get('description','')] for m in methods]
+                    )
+                doc.add_paragraph()
+
+        if queries:
+            add_section_heading(doc, 'Queries', 2)
+            for qry in queries:
+                add_hyperlink_heading(doc, qry.get('name', 'Query'))
+                add_bold_label(doc, 'Description:', qry.get('description', ''))
+
+                data_sources = qry.get('data_sources') or []
+                if data_sources:
+                    add_ax_subsection_table(
+                        doc, 'Data Sources:',
+                        ['Data Source', 'Table', 'Join Type'],
+                        [[ds.get('name',''), ds.get('table',''), ds.get('join_type','')] for ds in data_sources]
+                    )
+
+                fields = qry.get('fields') or []
+                if fields:
+                    add_ax_subsection_table(
+                        doc, 'Fields:',
+                        ['Data Source', 'Field'],
+                        [[f.get('data_source',''), f.get('field','')] for f in fields]
+                    )
+
+                ranges = qry.get('ranges') or []
+                if ranges:
+                    add_ax_subsection_table(
+                        doc, 'Ranges:',
+                        ['Data Source', 'Field', 'Value'],
+                        [[r.get('data_source',''), r.get('field',''), r.get('value','')] for r in ranges]
+                    )
+
+                methods = qry.get('methods') or []
+                if methods:
+                    add_ax_subsection_table(
+                        doc, 'Methods:',
+                        ['Method Name', 'Description'],
+                        [[m.get('name',''), m.get('description','')] for m in methods]
+                    )
                 doc.add_paragraph()
 
     # ── SECTION 6: Application Components ──
-    classes = [o for o in objects if o['type'] == 'class']
+    classes = [o for o in objects if o['type'] in ('class', 'class_extension')]
     if classes:
         add_section_heading(doc, '6.  Application Components', 1)
         p = doc.add_paragraph()
@@ -617,6 +740,31 @@ def generate_tdd_docx(header, objects):
             for s in services_only:
                 m_list = ', '.join([d.get('name', '') for d in s.get('details', [])])
                 add_data_row(s_table, [s.get('name', ''), m_list])
+            doc.add_paragraph()
+
+    # ── SECTION 9: Reports ──
+    reports = [o for o in objects if o['type'] == 'report']
+    if reports:
+        add_section_heading(doc, '9.  Reports', 1)
+        for rpt in reports:
+            add_hyperlink_heading(doc, rpt.get('name', 'Report'))
+            add_bold_label(doc, 'Description:', rpt.get('description', ''))
+            fields = rpt.get('fields') or []
+            if fields:
+                add_ax_subsection_table(
+                    doc,
+                    'Report Fields:',
+                    ['Field Label', 'Dataset Field', 'Source Table', 'Source Field', 'Data Type', 'Logic', 'Remarks'],
+                    [[
+                        f.get('field_label', ''),
+                        f.get('dataset_field', ''),
+                        f.get('source_table', ''),
+                        f.get('source_field', ''),
+                        f.get('data_type', ''),
+                        f.get('logic', ''),
+                        f.get('remarks', ''),
+                    ] for f in fields]
+                )
             doc.add_paragraph()
 
     # ── SECTION 8: Security ──

@@ -150,6 +150,9 @@
   .badge-form { background: rgba(62,207,142,0.15); color: var(--success); }
   .badge-view { background: rgba(79,142,247,0.15); color: var(--accent); }
   .badge-edt { background: rgba(79, 142, 247, 0.15); color: #e2e8f0; }
+  .badge-query { background: rgba(246,166,35,0.1); color: #f6c87a; }
+  .badge-report { background: rgba(240,82,82,0.12); color: #f87171; }
+  .badge-data_entity { background: rgba(62,207,142,0.12); color: #34d399; }
   .pill-name { color: var(--text); font-family: var(--mono); font-size: 11px; }
   .pill-delete {
     background: none; border: none; color: var(--text3); cursor: pointer;
@@ -434,8 +437,12 @@
             <option value="edt">EDT</option>
             <option value="form">Form</option>
             <option value="view">View</option>
+            <option value="query">Query</option>
+            <option value="enum">Enum</option>
             <option value="services">Services</option>
             <option value="security">Security</option>
+            <option value="data_entity">Data Entity</option>
+            <option value="report">Report</option>
             </select>
             <div class="toggle-wrap">
             <span class="toggle-label">New object</span>
@@ -448,8 +455,8 @@
 
         <div class="name-row">
             <div class="form-group">
-            <label>Object Name (optional — AI will detect)</label>
-            <input type="text" id="objectName" placeholder="e.g. HSIrradiationLoadingUnloadingHelper">
+            <label>Object Name (leave blank — AI detects from code)</label>
+            <input type="text" id="objectName" placeholder="Auto-detected from XML if left blank">
             </div>
         </div>
 
@@ -938,9 +945,13 @@
 
   const TYPE_LABELS = {
     class: 'Class', table: 'Table', form: 'Form', edt: 'EDT',
-    view: 'View', security: 'Security', services: 'Services',
+    view: 'View', query: 'Query', security: 'Security', services: 'Services',
     enum: 'Enum', data_entity: 'Data Entity',
-    table_extension: 'Table Extension', class_extension: 'Class Extension'
+    table_extension: 'Table Extension', class_extension: 'Class Extension',
+    form_extension: 'Form Extension', view_extension: 'View Extension',
+    edt_extension: 'EDT Extension', query_extension: 'Query Extension',
+    enum_extension: 'Enum Extension',
+    report: 'Report'
   };
 
   function renderObjectListing(objs) {
@@ -963,11 +974,14 @@
 
   function updatePreview() {
     const h = getHeader();
-    const forms = objects.filter(o => o.type === 'form');
-    const tables = objects.filter(o => o.type === 'table');
-    const edts = objects.filter(o => o.type === 'edt');
-    const classes = objects.filter(o => o.type === 'class');
-    const views = objects.filter(o => o.type === 'view');
+    const forms = objects.filter(o => o.type === 'form' || o.type === 'form_extension');
+    const tables = objects.filter(o => o.type === 'table' || o.type === 'table_extension');
+    const edts = objects.filter(o => o.type === 'edt' || o.type === 'edt_extension');
+    const classes = objects.filter(o => o.type === 'class' || o.type === 'class_extension');
+    const views = objects.filter(o => o.type === 'view' || o.type === 'view_extension');
+    const queries = objects.filter(o => o.type === 'query' || o.type === 'query_extension');
+    const enums = objects.filter(o => o.type === 'enum' || o.type === 'enum_extension');
+    const dataEntities = objects.filter(o => o.type === 'data_entity');
     const allServices = objects.filter(o => o.type === 'services');
     const securityObjects = objects.filter(o => o.type === 'security');
 
@@ -1021,12 +1035,25 @@
       html += '<div class="word-h1">4.&nbsp; User Interface</div><div class="word-h2">Forms</div><div class="word-p" style="color:#aaa;font-style:italic">No forms added yet</div>';
     }
 
-    if (tables.length > 0 || views.length > 0 || edts.length > 0) {
+    if (tables.length > 0 || views.length > 0 || edts.length > 0 || queries.length > 0 || dataEntities.length > 0 || enums.length > 0) {
       html += '<div class="word-h1">5.&nbsp; Data Dictionary</div>';
       if (edts.length > 0) {
         html += '<div class="word-h2">EDT</div>';
         html += renderAxSubTable('EDT:', ['Name', 'Type', 'Extends'],
           edts.map(e => [e.name, e.data_type, e.extends]));
+      }
+      if (enums.length > 0) {
+        html += '<div class="word-h2">Base Enums</div>';
+        enums.forEach(en => {
+          html += '<div class="word-h3">' + esc(en.name) + '</div>';
+          if (en.description) html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(en.description) + '</div>';
+          if (en.values && en.values.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Values:</div>';
+            html += '<table class="word-ax-table"><tr><th>Enum Name</th><th>Label</th></tr>';
+            en.values.forEach(v => html += '<tr><td>' + esc(v.name||'') + '</td><td>' + esc(v.label||'') + '</td></tr>');
+            html += '</table>';
+          }
+        });
       }
       if (tables.length > 0) {
         html += '<div class="word-h2">Tables</div>';
@@ -1035,8 +1062,100 @@
       if (views.length > 0) {
         html += '<div class="word-h2">Views</div>';
         views.forEach(v => {
-          html += '<div class="word-h3">' + v.name + '</div>';
-          html += '<div class="word-p"><span class="word-bold">Description:</span> ' + (v.description || '') + '</div>';
+          html += '<div class="word-h3">' + esc(v.name) + '</div>';
+          html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(v.description || '') + '</div>';
+          if (v.data_sources && v.data_sources.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Data Sources:</div>';
+            html += '<table class="word-ax-table"><tr><th>Data Source</th><th>Table</th></tr>';
+            v.data_sources.forEach(ds => html += '<tr><td>' + esc(ds.name||'') + '</td><td>' + esc(ds.table||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (v.fields && v.fields.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Fields:</div>';
+            html += '<table class="word-ax-table"><tr><th>Field Name</th><th>Data Source</th><th>EDT</th></tr>';
+            v.fields.forEach(f => html += '<tr><td>' + esc(f.name||'') + '</td><td>' + esc(f.data_source||'') + '</td><td>' + esc(f.edt||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (v.field_groups && v.field_groups.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Field Groups:</div>';
+            html += '<table class="word-ax-table"><tr><th>Field Group Name</th><th>Fields</th></tr>';
+            v.field_groups.forEach(g => html += '<tr><td>' + esc(g.name||'') + '</td><td>' + esc(g.fields||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (v.methods && v.methods.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Methods:</div>';
+            html += '<table class="word-table"><tr><th>Method Name</th><th>Description</th></tr>';
+            v.methods.forEach(m => html += '<tr><td>' + esc(m.name||'') + '</td><td>' + esc(m.description||'') + '</td></tr>');
+            html += '</table>';
+          }
+        });
+      }
+      if (queries.length > 0) {
+        html += '<div class="word-h2">Queries</div>';
+        queries.forEach(q => {
+          html += '<div class="word-h3">' + esc(q.name) + '</div>';
+          html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(q.description || '') + '</div>';
+          if (q.data_sources && q.data_sources.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Data Sources:</div>';
+            html += '<table class="word-ax-table"><tr><th>Data Source</th><th>Table</th><th>Join Type</th></tr>';
+            q.data_sources.forEach(ds => html += '<tr><td>' + esc(ds.name||'') + '</td><td>' + esc(ds.table||'') + '</td><td>' + esc(ds.join_type||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (q.fields && q.fields.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Fields:</div>';
+            html += '<table class="word-ax-table"><tr><th>Data Source</th><th>Field</th></tr>';
+            q.fields.forEach(f => html += '<tr><td>' + esc(f.data_source||'') + '</td><td>' + esc(f.field||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (q.ranges && q.ranges.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Ranges:</div>';
+            html += '<table class="word-ax-table"><tr><th>Data Source</th><th>Field</th><th>Value</th></tr>';
+            q.ranges.forEach(r => html += '<tr><td>' + esc(r.data_source||'') + '</td><td>' + esc(r.field||'') + '</td><td>' + esc(r.value||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (q.methods && q.methods.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Methods:</div>';
+            html += '<table class="word-ax-table"><tr><th>Method Name</th><th>Description</th></tr>';
+            q.methods.forEach(m => html += '<tr><td>' + esc(m.name||'') + '</td><td>' + esc(m.description||'') + '</td></tr>');
+            html += '</table>';
+          }
+        });
+      }
+      if (dataEntities.length > 0) {
+        html += '<div class="word-h2">Data Entities</div>';
+        dataEntities.forEach(de => {
+          html += '<div class="word-h3">' + esc(de.name) + '</div>';
+          html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(de.description || '') + '</div>';
+          if (de.data_sources && de.data_sources.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Data Sources:</div>';
+            html += '<table class="word-ax-table"><tr><th>Data Source</th><th>Table</th><th>Join Type</th></tr>';
+            de.data_sources.forEach(ds => html += '<tr><td>' + esc(ds.name||'') + '</td><td>' + esc(ds.table||'') + '</td><td>' + esc(ds.join_type||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (de.fields && de.fields.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Fields:</div>';
+            html += '<table class="word-ax-table"><tr><th>Field Name</th><th>Data Source</th><th>EDT</th></tr>';
+            de.fields.forEach(f => html += '<tr><td>' + esc(f.name||'') + '</td><td>' + esc(f.data_source||'') + '</td><td>' + esc(f.edt||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (de.entity_keys && de.entity_keys.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Entity Keys:</div>';
+            html += '<table class="word-ax-table"><tr><th>Key Name</th><th>Fields</th></tr>';
+            de.entity_keys.forEach(k => html += '<tr><td>' + esc(k.name||'') + '</td><td>' + esc(k.fields||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (de.field_groups && de.field_groups.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Field Groups:</div>';
+            html += '<table class="word-ax-table"><tr><th>Field Group Name</th><th>Fields</th></tr>';
+            de.field_groups.forEach(g => html += '<tr><td>' + esc(g.name||'') + '</td><td>' + esc(g.fields||'') + '</td></tr>');
+            html += '</table>';
+          }
+          if (de.methods && de.methods.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Methods:</div>';
+            html += '<table class="word-ax-table"><tr><th>Method Name</th><th>Description</th></tr>';
+            de.methods.forEach(m => html += '<tr><td>' + esc(m.name||'') + '</td><td>' + esc(m.description||'') + '</td></tr>');
+            html += '</table>';
+          }
         });
       }
     } else {
@@ -1105,7 +1224,24 @@
     } else {
       html += '<div class="word-h1">8.&nbsp; Security</div><div class="word-h2">Security Privileges</div><div class="word-p" style="color:#aaa;font-style:italic">No security objects added yet</div>';
     }
-    
+
+    const reports = objects.filter(o => o.type === 'report');
+    if (reports.length > 0) {
+      html += '<div class="word-h1">9.&nbsp; Reports</div>';
+      reports.forEach(r => {
+        html += '<div class="word-h3">' + esc(r.name) + '</div>';
+        html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(r.description || '') + '</div>';
+        if (r.fields && r.fields.length) {
+          html += '<div class="word-p word-bold" style="margin-top:8px">Report Fields:</div>';
+          html += '<table class="word-ax-table"><tr><th>Field Label</th><th>Dataset Field</th><th>Source Table</th><th>Source Field</th><th>Data Type</th><th>Logic</th><th>Remarks</th></tr>';
+          r.fields.forEach(f => html += '<tr><td>' + esc(f.field_label||'') + '</td><td>' + esc(f.dataset_field||'') + '</td><td>' + esc(f.source_table||'') + '</td><td>' + esc(f.source_field||'') + '</td><td>' + esc(f.data_type||'') + '</td><td>' + esc(f.logic||'') + '</td><td>' + esc(f.remarks||'') + '</td></tr>');
+          html += '</table>';
+        }
+      });
+    } else {
+      html += '<div class="word-h1">9.&nbsp; Reports</div><div class="word-p" style="color:#aaa;font-style:italic">No reports added yet</div>';
+    }
+
     html += '</div>';
     document.getElementById('wordDoc').innerHTML = html;
   }
@@ -1123,7 +1259,8 @@
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'TDD_Document.docx'; a.click();
+      const wi = getHeader().work_item;
+      a.href = url; a.download = wi ? `TDD_Document_${wi}.docx` : 'TDD_Document.docx'; a.click();
       showToast('✓ Word document downloaded!');
     } catch(e) {
       showToast('Error generating document', 'error');

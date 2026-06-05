@@ -4,6 +4,7 @@ import json
 import io
 import os
 import time
+import threading
 import re
 import difflib
 from dotenv import load_dotenv, set_key
@@ -14,6 +15,37 @@ from changeset_analyzer_service import ChangesetAnalyzerService
 from workitem_analyzer_service import WorkItemAnalyzerService
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Sliding-window TPM rate limiter
+# Tracks every AI call's token count in a 60-second window.  A new call is
+# allowed immediately if (used_in_window + est_tokens) <= TPM_LIMIT.
+# If the window is full it waits only until the oldest entry expires, then
+# re-checks — never over-waiting or blocking other workers unnecessarily.
+# ---------------------------------------------------------------------------
+_TPM_LIMIT  = 20_000
+_TPM_WINDOW = 60.0
+_ai_lock    = threading.Lock()
+_token_window: list = []   # [(monotonic_timestamp, token_count)]
+
+def _acquire_ai_slot(est_tokens: int):
+    """Block until the TPM sliding window has room, then reserve est_tokens."""
+    global _token_window
+    while True:
+        with _ai_lock:
+            now = time.monotonic()
+            # Drop entries older than the window
+            _token_window = [(t, n) for t, n in _token_window if now - t < _TPM_WINDOW]
+            used = sum(n for _, n in _token_window)
+            if used + est_tokens <= _TPM_LIMIT:
+                _token_window.append((now, est_tokens))
+                return          # slot acquired — caller may proceed
+            # Window is full: wait until the oldest entry expires
+            oldest = min(t for t, _ in _token_window)
+            wait = _TPM_WINDOW - (now - oldest) + 0.5
+        # Sleep OUTSIDE the lock so other threads can still check/acquire
+        print(f"  TPM window {used}/{_TPM_LIMIT} tokens used — waiting {wait:.0f}s")
+        time.sleep(min(wait, 10.0))   # re-check every 10 s in case window clears sooner
 
 app = Flask(__name__)
 
@@ -28,6 +60,22 @@ azure_service = AzureDevOpsService(ado_org, ado_pat, ado_project) if ado_org and
 ENDPOINT = "https://apim-sj-foundry-eastus2.azure-api.net/sj-foundry-eastus2-resource/openai/v1"
 DEPLOYMENT = "Kimi-K2.6-1"
 
+def _extract_name_from_xml(xml_content: str) -> str:
+    """Extract the object name from the root <Name> element of any AX XML file.
+    Matches the <Name> that is a direct child of the root AX element so nested
+    DataSource/Table/Relation names are never picked up by mistake."""
+    if not xml_content:
+        return ''
+    # Match <Name> immediately after the root AX opening tag
+    match = re.search(
+        r'<Ax[A-Za-z]+(?:\s[^>]*)?>[\s\S]{0,200}?<Name>([^<]+)</Name>',
+        xml_content
+    )
+    if match:
+        return match.group(1).strip()
+    return ''
+
+
 def _make_diff(old_code: str, new_code: str, context: int = 6) -> str:
     """Compute a unified diff between old and new code (6 lines of context)."""
     old_lines = old_code.splitlines(keepends=True)
@@ -37,6 +85,49 @@ def _make_diff(old_code: str, new_code: str, context: int = 6) -> str:
         fromfile='baseline', tofile='latest',
         n=context
     ))
+
+
+def _find_enclosing_method(source_lines: list, target_line_1based: int) -> str:
+    """Walk backward from target_line in X++ source to find the enclosing method name.
+
+    Looks for a line that starts with a recognised X++ access modifier followed by
+    a return-type word and then the method name before '('.  This mirrors what
+    'git diff' prints after the @@ marker as function context.
+    """
+    method_re = re.compile(
+        r'^\s*(?:public|private|protected|internal)\s+'  # access modifier
+        r'(?:(?:static|final|abstract|display|edit|server|client)\s+)*'  # optional qualifiers
+        r'\w[\w<>\[\]]*\s+'                               # return type
+        r'(\w+)\s*\(',                                    # method name (
+    )
+    idx = min(target_line_1based - 1, len(source_lines) - 1)
+    for i in range(idx, -1, -1):
+        m = method_re.match(source_lines[i])
+        if m:
+            return m.group(1)
+    return ''
+
+
+def _annotate_diff_with_methods(diff: str, source_code: str) -> str:
+    """Append the enclosing method name to each @@ hunk header that lacks one.
+
+    This lets the AI identify which method a hunk belongs to even when the
+    method signature line falls outside the context window.
+    """
+    if not diff or not source_code:
+        return diff
+    source_lines = source_code.splitlines()
+    hunk_re = re.compile(r'^(@@ -(\d+),?\d* \+\d+,?\d* @@)([ \t]*)$')
+    result = []
+    for line in diff.splitlines(keepends=True):
+        m = hunk_re.match(line.rstrip('\n').rstrip('\r'))
+        if m:
+            old_start = int(m.group(2))
+            method = _find_enclosing_method(source_lines, old_start)
+            if method:
+                line = line.rstrip('\n').rstrip('\r') + f' {method}\n'
+        result.append(line)
+    return ''.join(result)
 
 
 def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
@@ -49,8 +140,13 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
 
     if not is_new and old_code and new_code:
         diff = _make_diff(old_code, new_code)
+        # Annotate @@ hunk headers with the enclosing method name so the AI can
+        # identify the method even when its signature is outside the context window.
+        diff = _annotate_diff_with_methods(diff, old_code)
         combined_len = len(old_code) + len(new_code)
-        if diff and len(diff) < combined_len * 0.7:
+        # Use diff if it saves any tokens (threshold: diff < 95% of combined).
+        # Views/forms/queries can be very large XMLs — even a 10% saving avoids TPM overflows.
+        if diff and len(diff) < combined_len * 0.95:
             effective_old = diff
             effective_new = ''
             diff_mode = True
@@ -69,20 +165,16 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
         base_url=ENDPOINT,
         api_key="unused",  # real auth is the api-key header below
         default_headers={"api-key": api_key},
+        timeout=120.0,  # 2-minute hard timeout per request — prevents infinite hang
     )
 
-    # Adaptive delay: estimate input tokens (1 token ≈ 4 chars) and calculate
-    # the minimum wait needed so the sliding 60s / 20K TPM window doesn't overflow.
-    # Formula: (tokens × 60s) / 20,000 TPM + 5s buffer, minimum 12s.
-    # Small objects (~1K tokens) → ~12s, large objects (~13K tokens) → ~44s.
+    # Wait for a safe slot before calling the AI — serializes concurrent workers
+    # so their combined token usage never bursts past the 20K TPM window.
     est_tokens = sum(len(m.get('content', '')) for m in messages) // 4
-    adaptive_delay = max(12, (est_tokens * 60 // 20000) + 5)
-    print(f"  [{object_name}] estimated {est_tokens} tokens — waiting {adaptive_delay}s before API call")
-    time.sleep(adaptive_delay)
+    print(f"  [{object_name}] ~{est_tokens} tokens — acquiring AI slot")
+    _acquire_ai_slot(est_tokens)
 
-    # On 429, wait 90s per retry. Azure uses a sliding TPM window — tokens
-    # burned near the end of the previous window can still be "in flight" for
-    # up to 60s, so 62s is often not enough. 90s clears any sliding tail.
+    # On 429, wait 60s per retry. Azure uses a sliding TPM window.
     max_retries = 5
     raw = None
     for attempt in range(max_retries):
@@ -97,13 +189,18 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
             err = str(e)
             if '429' in err or 'RateLimitReached' in err:
                 if attempt < max_retries - 1:
-                    print(f"Rate limit hit for '{object_name}' — sliding window, waiting 90s (attempt {attempt + 1}/{max_retries})...")
-                    time.sleep(90)
+                    print(f"Rate limit hit for '{object_name}' — waiting 60s (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(60)
                 else:
                     raise Exception(
                         f"AI analysis failed after {max_retries} retries due to rate limit. "
                         "The object may be too large for the 20K TPM quota in a single call."
                     )
+            elif 'timeout' in err.lower() or 'timed out' in err.lower():
+                if attempt < max_retries - 1:
+                    print(f"Request timed out for '{object_name}' — retrying (attempt {attempt + 1}/{max_retries})...")
+                else:
+                    raise Exception(f"AI analysis timed out after {max_retries} attempts for '{object_name}'.")
             else:
                 raise Exception(f"AI analysis failed: {err}")
 
@@ -117,9 +214,21 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
     except json.JSONDecodeError:
         raise Exception(f"AI model returned an improperly formatted JSON response. Please try again. Raw response: {raw[:200]}...")
 
-    if result.get('type') == 'table':
+    if result.get('type') in ('table', 'table_extension'):
         result = enrich_table_result(result, old_code, new_code, is_new)
         result = normalize_table_result(result)
+
+    # Extension types: AI uses the base-type prompt so returns the base type name.
+    # Restore the real detected type so the rendering layers use the right section.
+    if object_type in _EXTENSION_TO_BASE and result.get('type') == _EXTENSION_TO_BASE[object_type]:
+        result['type'] = object_type
+
+    # Override AI-detected name with the actual root <Name> from the XML.
+    # The AI can pick up wrong names from nested DataSources/Tables/Relations.
+    # Prefer new_code; fall back to old_code for deleted objects.
+    xml_name = _extract_name_from_xml(new_code or old_code)
+    if xml_name:
+        result['name'] = xml_name
 
     return result
 
@@ -250,10 +359,12 @@ def generate_docx():
         objects.append(o)
 
     buf = generate_tdd_docx(header, objects)
+    wi = header.get('work_item', '').strip()
+    filename = f"TDD_Document_{wi}.docx" if wi else "TDD_Document.docx"
     return send_file(
         buf,
         as_attachment=True,
-        download_name='TDD_Document.docx',
+        download_name=filename,
         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     )
 
@@ -417,14 +528,45 @@ Rules:
 - 'modified_controls': Controls that exist in both but have property changes (e.g. different label, data source, etc).
 - For new forms, all controls should be in 'added_controls'."""
 
-_VIEW_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX view XML and extract TDD documentation.
+_VIEW_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX view XML and extract TDD documentation for ONLY what was added or changed.
 
 Return ONLY a JSON object in this exact format with no preamble or markdown:
 {
   "type": "view",
   "name": "<view name>",
-  "description": "<what this view does. IF items were deleted, mention it here.>"
-}"""
+  "description": "<what this view does. IF items were deleted, mention it here.>",
+  "data_sources": [
+    {
+      "name": "<data source name>",
+      "table": "<underlying table name>"
+    }
+  ],
+  "fields": [
+    {
+      "name": "<field name>",
+      "data_source": "<data source this field comes from>",
+      "edt": "<EDT name if visible, else empty string>"
+    }
+  ],
+  "field_groups": [
+    {
+      "name": "<field group name>",
+      "fields": "<comma-separated field names in this group>"
+    }
+  ],
+  "methods": [
+    {
+      "name": "<method name>",
+      "description": "<what this method does, one sentence>"
+    }
+  ]
+}
+
+Rules:
+- Only include items that were added or modified — not deleted ones.
+- Mention deleted items ONLY in the description field.
+- Omit any array key entirely if nothing was added or changed in that category.
+- Do not return empty arrays."""
 
 _SERVICES_SYSTEM = """You are a D365 AX technical documentation expert. Analyze XML and determine if it is a Service Group or a Service.
 
@@ -447,6 +589,141 @@ Rules:
 - If subtype is 'service', 'details' lists the class methods exposed as service operations.
 - IF items were deleted, mention it in the description.
 - Only include added or modified items."""
+
+_QUERY_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX query XML and extract TDD documentation for ONLY what was added or changed.
+
+Return ONLY a JSON object in this exact format with no preamble or markdown:
+{
+  "type": "query",
+  "name": "<query name>",
+  "description": "<one line description of what this query retrieves. IF items were deleted, mention it here.>",
+  "data_sources": [
+    {
+      "name": "<data source name>",
+      "table": "<table name>",
+      "join_type": "<Inner / Outer / Exists / NotExists — leave blank if root>"
+    }
+  ],
+  "fields": [
+    {
+      "data_source": "<data source name>",
+      "field": "<field name>"
+    }
+  ],
+  "ranges": [
+    {
+      "data_source": "<data source name>",
+      "field": "<field name>",
+      "value": "<range value or expression, blank if dynamic>"
+    }
+  ],
+  "methods": [
+    {
+      "name": "<method name>",
+      "description": "<what this method does, one sentence>"
+    }
+  ]
+}
+
+Rules:
+- Only include data_sources, fields, ranges, and methods that were added or modified.
+- Omit any array key entirely if nothing was added or changed in that category.
+- Mention deleted items ONLY in the description field.
+- Do not return empty arrays."""
+
+_ENUM_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX Base Enum XML and extract TDD documentation for ONLY what was added or changed.
+
+Return ONLY a JSON object in this exact format with no preamble or markdown:
+{
+  "type": "enum",
+  "name": "<enum name from XML>",
+  "description": "<one line description of what this enum represents. IF values were deleted, mention it here.>",
+  "values": [
+    {
+      "name": "<enum value name e.g. Approved>",
+      "label": "<display label shown in UI e.g. Approved>"
+    }
+  ]
+}
+
+Rules:
+- Only include enum values that were added or modified — not deleted ones.
+- Mention deleted values ONLY in the description field.
+- Omit the "values" key entirely if no values were added or changed.
+- Do not return empty arrays."""
+
+_DATA_ENTITY_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX Data Entity XML and extract TDD documentation for ONLY what was added or changed.
+
+Return ONLY a JSON object in this exact format with no preamble or markdown:
+{
+  "type": "data_entity",
+  "name": "<entity name from XML>",
+  "description": "<one line description of what this entity exposes. IF items were deleted, mention it here.>",
+  "data_sources": [
+    {
+      "name": "<data source name>",
+      "table": "<underlying table name>",
+      "join_type": "<Root / Inner / Outer / Exists — Root for the primary table>"
+    }
+  ],
+  "fields": [
+    {
+      "name": "<field name>",
+      "data_source": "<data source this field comes from>",
+      "edt": "<EDT name if visible, else empty string>"
+    }
+  ],
+  "entity_keys": [
+    {
+      "name": "<key name>",
+      "fields": "<comma-separated field names in this key>"
+    }
+  ],
+  "field_groups": [
+    {
+      "name": "<field group name>",
+      "fields": "<comma-separated field names in this group>"
+    }
+  ],
+  "methods": [
+    {
+      "name": "<method name>",
+      "description": "<what this method does, one sentence>"
+    }
+  ]
+}
+
+Rules:
+- Only include items that were added or modified — not deleted ones.
+- Mention deleted items ONLY in the description field.
+- Omit any array key entirely if nothing was added or changed in that category.
+- Do not return empty arrays."""
+
+_REPORT_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX SSRS report XML and extract TDD documentation for ONLY what was added or changed.
+
+Return ONLY a JSON object in this exact format with no preamble or markdown:
+{
+  "type": "report",
+  "name": "<report name>",
+  "description": "<one line description of what this report shows. IF items were deleted, mention it here.>",
+  "fields": [
+    {
+      "field_label": "<display label shown on the report>",
+      "dataset_field": "<dataset field name>",
+      "source_table": "<source table name>",
+      "source_field": "<source field name>",
+      "data_type": "<data type e.g. String, Int64, Date, Real>",
+      "logic": "<any calculation, expression, or lookup logic — blank if straightforward>",
+      "remarks": "<additional notes or remarks — blank if none>"
+    }
+  ]
+}
+
+Rules:
+- Only include fields that were added or modified — not deleted ones.
+- Mention deleted fields ONLY in the description field.
+- Omit the "fields" key entirely if no fields were added or changed.
+- Do not return empty arrays."""
 
 _SECURITY_SYSTEM = """You are a D365 AX technical documentation expert. Analyze XML and determine if it is a Security Privilege, Duty, Role, or Policy.
 
@@ -471,7 +748,20 @@ Rules:
 - IF items were deleted, mention it in the description."""
 
 
+_EXTENSION_TO_BASE = {
+    'table_extension': 'table',
+    'form_extension': 'form',
+    'view_extension': 'view',
+    'edt_extension': 'edt',
+    'query_extension': 'query',
+    'enum_extension': 'enum',
+    'class_extension': 'class',
+}
+
+
 def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mode=False):
+    if not object_name:
+        object_name = "(detect from code)"
     """Return [system, user] messages for prompt caching.
 
     The system message holds the static format instructions for the object type —
@@ -488,7 +778,10 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
     else:
         change_label = "diff (old vs new)"
 
-    if object_type == 'class':
+    # Extension types use their base type's prompt; the caller restores the real type after.
+    effective_type = _EXTENSION_TO_BASE.get(object_type, object_type)
+
+    if effective_type == 'class':
         system = _CLASS_SYSTEM
         if is_new:
             user = f"Object Name: {object_name}\nObject Type: Class\nChange Type: new class — analyze all methods\n\n{new_code}"
@@ -497,7 +790,7 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         else:
             user = f"Object Name: {object_name}\nObject Type: Class\nChange Type: diff (old vs new)\n\nOld code:\n{old_code}\n\nNew code:\n{new_code}"
 
-    elif object_type == 'table':
+    elif effective_type == 'table':
         system = _TABLE_SYSTEM
         if is_new:
             user = f"Object Name: {object_name}\nObject Type: Table\nChange Type: new table\n\n{new_code}"
@@ -506,7 +799,16 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         else:
             user = f"Object Name: {object_name}\nObject Type: Table\nChange Type: diff (old vs new)\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
 
-    elif object_type == 'edt':
+    elif effective_type == 'enum':
+        system = _ENUM_SYSTEM
+        if is_new:
+            user = f"Object Name: {object_name}\nObject Type: Enum\nChange Type: new enum\n\n{new_code}"
+        elif diff_mode:
+            user = f"Object Name: {object_name}\nObject Type: Enum\nChange Type: {change_label}\n\n{old_code}"
+        else:
+            user = f"Object Name: {object_name}\nObject Type: Enum\nChange Type: diff (old vs new)\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
+
+    elif effective_type == 'edt':
         system = _EDT_SYSTEM
         if is_new:
             user = f"Object Name: {object_name}\nObject Type: EDT\nChange Type: new EDT\n\n{new_code}"
@@ -515,7 +817,7 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         else:
             user = f"Object Name: {object_name}\nObject Type: EDT\nChange Type: diff\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
 
-    elif object_type == 'form':
+    elif effective_type == 'form':
         system = _FORM_SYSTEM
         if is_new:
             user = f"Object Name: {object_name}\nObject Type: Form\nChange Type: new form\n\n{new_code}"
@@ -524,7 +826,16 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         else:
             user = f"Object Name: {object_name}\nObject Type: Form\nChange Type: diff\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
 
-    elif object_type == 'view':
+    elif effective_type == 'query':
+        system = _QUERY_SYSTEM
+        if is_new:
+            user = f"Object Name: {object_name}\nObject Type: Query\nChange Type: new query\n\n{new_code}"
+        elif diff_mode:
+            user = f"Object Name: {object_name}\nObject Type: Query\nChange Type: {change_label}\n\n{old_code}"
+        else:
+            user = f"Object Name: {object_name}\nObject Type: Query\nChange Type: diff (old vs new)\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
+
+    elif effective_type == 'view':
         system = _VIEW_SYSTEM
         if is_new:
             code = new_code
@@ -543,6 +854,24 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         system = _SECURITY_SYSTEM
         code = new_code if is_new else old_code if diff_mode else f"{old_code}\n{new_code}"
         user = f"Object Name: {object_name}\nChange Type: {change_label}\n\n{code}"
+
+    elif object_type == 'data_entity':
+        system = _DATA_ENTITY_SYSTEM
+        if is_new:
+            user = f"Object Name: {object_name}\nObject Type: Data Entity\nChange Type: new entity\n\n{new_code}"
+        elif diff_mode:
+            user = f"Object Name: {object_name}\nObject Type: Data Entity\nChange Type: {change_label}\n\n{old_code}"
+        else:
+            user = f"Object Name: {object_name}\nObject Type: Data Entity\nChange Type: diff (old vs new)\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
+
+    elif object_type == 'report':
+        system = _REPORT_SYSTEM
+        if is_new:
+            user = f"Object Name: {object_name}\nObject Type: Report\nChange Type: new report\n\n{new_code}"
+        elif diff_mode:
+            user = f"Object Name: {object_name}\nObject Type: Report\nChange Type: {change_label}\n\n{old_code}"
+        else:
+            user = f"Object Name: {object_name}\nObject Type: Report\nChange Type: diff (old vs new)\n\nOld XML:\n{old_code}\n\nNew XML:\n{new_code}"
 
     else:
         system = f'You are a D365 AX technical documentation expert. Analyze {object_type} code/XML and return a JSON summary.\n\nReturn ONLY: {{"type": "{object_type}", "name": "<name>", "description": "<description>"}}'
