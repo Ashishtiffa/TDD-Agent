@@ -131,9 +131,27 @@ _METHOD_SIG_RE = re.compile(
     r'\w[\w<>\[\]]*\s+(\w+)\s*\(',
 )
 
+# Matches an annotated @@ hunk header: "@@ -N,N +N,N @@ methodName"
+_HUNK_METHOD_RE = re.compile(r'^@@ [^@]+ @@ (\w+)\s*$')
+
+
 def _class_methods_from_diff(diff: str) -> List[str]:
+    """Return changed/added method names from a unified diff string.
+
+    Two sources are checked in order:
+    1. Annotated @@ hunk headers added by _annotate_diff_with_methods in app.py
+       — these capture methods whose BODY changed (signature on a context line).
+    2. + lines whose content matches a method signature
+       — these capture newly ADDED methods.
+    """
     names, seen = [], set()
     for line in (diff or '').splitlines():
+        if line.startswith('@@'):
+            m = _HUNK_METHOD_RE.match(line.strip())
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                names.append(m.group(1))
+            continue
         if not (line.startswith('+') and not line.startswith('+++')):
             continue
         m = _METHOD_SIG_RE.match(line[1:])
@@ -141,6 +159,7 @@ def _class_methods_from_diff(diff: str) -> List[str]:
             seen.add(m.group(1))
             names.append(m.group(1))
     return names
+
 
 def _class_methods_from_source(source: str) -> List[str]:
     names, seen = [], set()
@@ -150,6 +169,32 @@ def _class_methods_from_source(source: str) -> List[str]:
             seen.add(m.group(1))
             names.append(m.group(1))
     return names
+
+
+def _extract_method_bodies(source: str) -> Dict[str, str]:
+    """Return a map of method_name → full source block (signature + body)."""
+    result: Dict[str, str] = {}
+    lines = source.splitlines()
+    i = 0
+    while i < len(lines):
+        sig_m = _METHOD_SIG_RE.match(lines[i])
+        if sig_m:
+            name = sig_m.group(1)
+            body: List[str] = [lines[i]]
+            depth = lines[i].count('{') - lines[i].count('}')
+            j = i + 1
+            while j < len(lines):
+                body.append(lines[j])
+                depth += lines[j].count('{') - lines[j].count('}')
+                j += 1
+                if depth <= 0:
+                    break
+            result[name] = '\n'.join(body)
+            i = j
+        else:
+            i += 1
+    return result
+
 
 def parse_class(old_code: str, new_code: str, is_new: bool, diff_mode: bool = False) -> Dict:
     result: Dict = {}
@@ -167,8 +212,17 @@ def parse_class(old_code: str, new_code: str, is_new: bool, diff_mode: bool = Fa
     else:
         old_m = set(_class_methods_from_source(old_code or ''))
         new_m = set(_class_methods_from_source(new_code or ''))
+        # Truly new methods (signature added)
         method_names = [m for m in new_m if m not in old_m]
         deleted = sorted(old_m - new_m)
+        # No new method signatures found — check for methods whose body changed
+        if not method_names and old_code and new_code:
+            old_bodies = _extract_method_bodies(old_code)
+            new_bodies = _extract_method_bodies(new_code)
+            method_names = [
+                m for m in new_bodies
+                if m in old_bodies and new_bodies[m].strip() != old_bodies[m].strip()
+            ]
     if method_names:
         result['method_names'] = method_names
     if deleted:
@@ -504,19 +558,24 @@ def parse_data_entity(old_xml: str, new_xml: str, is_new: bool, diff_mode: bool 
     old_state, new_state = _parse_states(old_xml, new_xml, is_new, diff_mode)
     result: Dict = {}
 
-    old_ds = _name_set(old_state, 'AxDataEntityViewDataSource')
-    ds_list = [{'name': _tag(b, 'Name'), 'table': _tag(b, 'Table'),
-                'join_type': _tag(b, 'JoinMode') or _tag(b, 'FetchMode')}
-               for b in _blocks(new_state, 'AxDataEntityViewDataSource')
-               if _tag(b, 'Name') and _tag(b, 'Name') not in old_ds]
+    old_ds: Set[str] = set()
+    for tag in ('AxDataEntityViewDataSource', 'AxDataEntityViewExtensionDataSource'):
+        old_ds |= _name_set(old_state, tag)
+    ds_list = []
+    for tag in ('AxDataEntityViewDataSource', 'AxDataEntityViewExtensionDataSource'):
+        for b in _blocks(new_state, tag):
+            name = _tag(b, 'Name')
+            if name and name not in old_ds:
+                ds_list.append({'name': name, 'table': _tag(b, 'Table'),
+                                'join_type': _tag(b, 'JoinMode') or _tag(b, 'FetchMode')})
     if ds_list:
         result['data_sources'] = ds_list
 
     old_fields: Set[str] = set()
-    for tag in ('AxDataEntityViewField', 'AxViewField'):
+    for tag in ('AxDataEntityViewField', 'AxViewField', 'AxDataEntityViewExtensionField', 'AxDataEntityViewExtensionMappedField'):
         old_fields |= _name_set(old_state, tag)
     fields = []
-    for tag in ('AxDataEntityViewField', 'AxViewField'):
+    for tag in ('AxDataEntityViewField', 'AxViewField', 'AxDataEntityViewExtensionField', 'AxDataEntityViewExtensionMappedField'):
         for b in _blocks(new_state, tag):
             name = _tag(b, 'Name')
             if name and name not in old_fields:
@@ -549,10 +608,10 @@ def parse_data_entity(old_xml: str, new_xml: str, is_new: bool, diff_mode: bool 
 
     if old_state:
         all_old_fields: Set[str] = set()
-        for tag in ('AxDataEntityViewField', 'AxViewField'):
+        for tag in ('AxDataEntityViewField', 'AxViewField', 'AxDataEntityViewExtensionField', 'AxDataEntityViewExtensionMappedField'):
             all_old_fields |= _name_set(old_state, tag)
         all_new_fields: Set[str] = set()
-        for tag in ('AxDataEntityViewField', 'AxViewField'):
+        for tag in ('AxDataEntityViewField', 'AxViewField', 'AxDataEntityViewExtensionField', 'AxDataEntityViewExtensionMappedField'):
             all_new_fields |= _name_set(new_state, tag)
         deleted = sorted((all_old_fields - all_new_fields) |
                          set(_find_deleted(old_state, new_state, 'Method')))
