@@ -10,6 +10,7 @@ import difflib
 from dotenv import load_dotenv, set_key
 from docx_generator import generate_tdd_docx
 from table_xml_parser import enrich_table_result
+from ax_xml_parser import parse_object as _xml_parse_object
 from azure_devops_service import AzureDevOpsService
 from changeset_analyzer_service import ChangesetAnalyzerService
 from workitem_analyzer_service import WorkItemAnalyzerService
@@ -27,6 +28,9 @@ _TPM_LIMIT  = 20_000
 _TPM_WINDOW = 60.0
 _ai_lock    = threading.Lock()
 _token_window: list = []   # [(monotonic_timestamp, token_count)]
+
+_session_usage = {"prompt": 0, "completion": 0, "total": 0}
+_usage_lock = threading.Lock()
 
 def _acquire_ai_slot(est_tokens: int):
     """Block until the TPM sliding window has room, then reserve est_tokens."""
@@ -153,9 +157,31 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
             saving_pct = 100 - (100 * len(diff) // combined_len)
             print(f"  [{object_name}] diff compression: {combined_len:,} → {len(diff):,} chars (saved {saving_pct}%)")
 
-    # build_messages returns [system, user] — system message is static per object type
-    # and gets cached by the API, so only the user message (the actual code) is billed per call.
-    messages = build_messages(object_type, is_new, effective_old, effective_new, object_name, diff_mode=diff_mode)
+    # HYBRID PATH: XML parser extracts structure; LLM writes descriptions only.
+    # For report and unknown types, fall through to the original full-XML LLM path.
+    use_hybrid = object_type in _HYBRID_TYPES
+
+    if use_hybrid:
+        # Classes: diff tells us exactly which methods changed
+        # XML types: prefer diff when available (only changed hunks → only changed items)
+        #            fall back to full old_code vs new_code when no diff
+        if object_type in ('class', 'class_extension'):
+            parsed_facts = _xml_parse_object(object_type, effective_old, effective_new, is_new, diff_mode, object_name=object_name)
+        elif diff_mode:
+            # effective_old = unified diff; parser reconstructs before/after states internally
+            parsed_facts = _xml_parse_object(object_type, effective_old, '', is_new, diff_mode=True, object_name=object_name)
+        else:
+            parsed_facts = _xml_parse_object(object_type, old_code, new_code, is_new, diff_mode=False, object_name=object_name)
+
+        if parsed_facts is None:
+            use_hybrid = False  # unknown type — fall back
+        else:
+            messages = _build_desc_messages(object_type, object_name, parsed_facts, is_new)
+            print(f"  [{object_name}] hybrid mode — LLM asked for descriptions only")
+
+    if not use_hybrid:
+        # Original path: send full XML/diff to LLM and ask for full JSON
+        messages = build_messages(object_type, is_new, effective_old, effective_new, object_name, diff_mode=diff_mode)
 
     api_key = os.environ.get("KIMI_API_KEY")
     if not api_key:
@@ -184,6 +210,21 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
                 messages=messages,
             )
             raw = completion.choices[0].message.content
+            usage = completion.usage
+            if usage:
+                pt = usage.prompt_tokens or 0
+                ct = usage.completion_tokens or 0
+                tt = usage.total_tokens or (pt + ct)
+                print(f"  [{object_name}] tokens — prompt:{pt} completion:{ct} total:{tt}")
+                with _ai_lock:
+                    for i in range(len(_token_window) - 1, -1, -1):
+                        if _token_window[i][1] == est_tokens:
+                            _token_window[i] = (_token_window[i][0], tt)
+                            break
+                with _usage_lock:
+                    _session_usage["prompt"]     += pt
+                    _session_usage["completion"] += ct
+                    _session_usage["total"]      += tt
             break
         except Exception as e:
             err = str(e)
@@ -207,21 +248,28 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
     if raw is None:
         raise Exception("AI analysis failed: no response received.")
 
-    clean = raw.replace('```json', '').replace('```', '').strip()
+    raw_clean = raw.replace('```json', '').replace('```', '').strip()
 
     try:
-        result = json.loads(clean)
+        llm_json = json.loads(raw_clean)
     except json.JSONDecodeError:
         raise Exception(f"AI model returned an improperly formatted JSON response. Please try again. Raw response: {raw[:200]}...")
 
-    if result.get('type') in ('table', 'table_extension'):
-        result = enrich_table_result(result, old_code, new_code, is_new)
-        result = normalize_table_result(result)
-
-    # Extension types: AI uses the base-type prompt so returns the base type name.
-    # Restore the real detected type so the rendering layers use the right section.
-    if object_type in _EXTENSION_TO_BASE and result.get('type') == _EXTENSION_TO_BASE[object_type]:
-        result['type'] = object_type
+    if use_hybrid:
+        # Merge XML-parsed structure with LLM-generated descriptions
+        result = _merge_parsed_and_llm(object_type, object_name, parsed_facts, llm_json, is_new)
+        # Normalize table structure (strip empty arrays, fix type/edt aliases)
+        if object_type in ('table', 'table_extension'):
+            result = normalize_table_result(result)
+    else:
+        result = llm_json
+        if result.get('type') in ('table', 'table_extension'):
+            result = enrich_table_result(result, old_code, new_code, is_new)
+            result = normalize_table_result(result)
+        # Extension types: AI uses the base-type prompt so returns the base type name.
+        # Restore the real detected type so the rendering layers use the right section.
+        if object_type in _EXTENSION_TO_BASE and result.get('type') == _EXTENSION_TO_BASE[object_type]:
+            result['type'] = object_type
 
     # Override AI-detected name with the actual root <Name> from the XML.
     # The AI can pick up wrong names from nested DataSources/Tables/Relations.
@@ -231,6 +279,19 @@ def perform_ai_analysis(object_type, is_new, old_code, new_code, object_name):
         result['name'] = xml_name
 
     return result
+
+@app.route('/token-usage')
+def token_usage():
+    with _usage_lock:
+        return jsonify(dict(_session_usage))
+
+@app.route('/reset-token-usage', methods=['POST'])
+def reset_token_usage():
+    with _usage_lock:
+        _session_usage["prompt"] = 0
+        _session_usage["completion"] = 0
+        _session_usage["total"] = 0
+    return jsonify({"reset": True})
 
 @app.route('/ado-status')
 def ado_status():
@@ -418,60 +479,10 @@ Rules:
 - DO NOT include deleted methods in the 'methods' array. Only include methods that were added or modified.
 - Mention any deleted methods ONLY in the 'description' field."""
 
-_TABLE_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX table XML and extract TDD documentation for ONLY what was added or changed.
-
-Return ONLY a JSON object in this exact format with no preamble or markdown:
-{
-  "type": "table",
-  "name": "<table name from XML>",
-  "description": "<one line description. IF fields/methods/indexes were deleted, mention it here e.g. 'Field X and Method Y deleted.'>",
-  "fields": [
-    {
-      "name": "<field name>",
-      "type": "<primitive type e.g. String, Int64, Real — from XML or EDT>",
-      "edt": "<EDT name>"
-    }
-  ],
-  "field_groups": [
-    {
-      "name": "<field group name>",
-      "fields": "<comma-separated field names e.g. Name, Age>"
-    }
-  ],
-  "indexes": [
-    {
-      "name": "<index name>",
-      "fields": "<comma-separated indexed field names>"
-    }
-  ],
-  "relations": [
-    {
-      "name": "<relation name>",
-      "field": "<field on this table>",
-      "related_table": "<related table name>",
-      "related_table_field": "<field on related table>"
-    }
-  ],
-  "methods": [
-    {
-      "name": "<method name>",
-      "description": "<what this method does, one sentence>"
-    }
-  ]
-}
-
-Rules:
-- DO NOT include deleted fields, methods, indexes, or relations in the arrays. Only include added or modified items.
-- Mention any deleted items ONLY in the 'description' field.
-- Omit any array entirely (do not include the key) if nothing was added or changed in that category.
-- For a diff: compare old vs new XML carefully.
-- "fields": Include new fields AND existing fields changed in the diff (e.g. AllowEdit on ApproversName).
-- Each field row — three columns from XML, never swapped:
-  - "name" = <Name> only (e.g. ApproversName)
-  - "type" = from i:type (AxTableFieldString → String, AxTableFieldEnum → Enum)
-  - "edt" = <ExtendedDataType> only (e.g. HSOCRApproversName) — leave "" if missing; do NOT put field name or EnumType in edt for string fields
-- "field_groups": ONLY groups that changed; "fields" column lists ONLY field names newly added to that group.
-- Do not return empty arrays."""
+_TABLE_SYSTEM = """D365 AX TDD expert. Analyze AX table XML. Return ONLY JSON for added/changed items, no preamble.
+Schema (omit any key with no changes, no empty arrays):
+{"type":"table","name":"<name>","description":"<one line; list deletions here>","fields":[{"name":"<Name>","type":"<String|Int64|Real|Enum|...>","edt":"<EDT or empty>"}],"field_groups":[{"name":"<group>","fields":"<added field names csv>"}],"indexes":[{"name":"<idx>","fields":"<fields csv>"}],"relations":[{"name":"<rel>","field":"<col>","related_table":"<tbl>","related_table_field":"<col>"}],"methods":[{"name":"<m>","description":"<one sentence>"}]}
+Field rules: name=<Name> element only. type=from i:type attr (AxTableFieldString->String, AxTableFieldEnum->Enum). edt=ExtendedDataType element value, empty string if absent. field_groups: only changed groups, list only newly added field names."""
 
 _EDT_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX EDT XML and extract TDD documentation.
 
@@ -484,89 +495,15 @@ Return ONLY a JSON object in this exact format with no preamble or markdown:
   "extends": "<Base EDT name it extends>"
 }"""
 
-_FORM_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX form XML and extract TDD documentation.
+_FORM_SYSTEM = """D365 AX TDD expert. Analyze AX form XML. Return ONLY JSON for added/changed items, no preamble.
+Schema (omit empty arrays):
+{"type":"form","name":"<name>","description":"<one line; list deletions here>","properties":{"pattern":"","style":"","caption":"","data_source":""},"added_controls":[{"name":"<ctrl>","control_type":"<CheckBox|String|Button|...>","data_source":"<ds>","data_field":"<field>"}],"modified_controls":[{"name":"<ctrl>","control_type":"<type>","data_source":"<ds>","data_field":"<field>"}],"methods":[{"name":"<method only, no return type>","description":"<one sentence>"}]}
+Rules: added_controls=new XML only. modified_controls=changed properties only. For new forms all controls go in added_controls."""
 
-Return ONLY a JSON object in this exact format with no preamble or markdown:
-{
-  "type": "form",
-  "name": "<form name>",
-  "description": "<one line description. IF controls/methods were deleted, mention it here e.g. 'Control X deleted.'>",
-  "properties": {
-    "pattern": "<pattern if visible>",
-    "style": "<style if visible>",
-    "caption": "<caption if visible>",
-    "data_source": "<data source if visible>"
-  },
-  "added_controls": [
-    {
-      "name": "<control name>",
-      "control_type": "<CheckBox/String/Button etc>",
-      "data_source": "<data source>",
-      "data_field": "<data field>"
-    }
-  ],
-  "modified_controls": [
-    {
-      "name": "<control name>",
-      "control_type": "<CheckBox/String/Button etc>",
-      "data_source": "<data source>",
-      "data_field": "<data field>"
-    }
-  ],
-  "methods": [
-    {
-      "name": "<method name ONLY, e.g. 'init', no return type or params>",
-      "description": "<what this method does>"
-    }
-  ]
-}
-
-Rules:
-- DO NOT include deleted controls or methods in the arrays. Only include added or modified items.
-- Mention any deleted items ONLY in the 'description' field.
-- 'added_controls': Controls that exist in the new XML but NOT in the old XML.
-- 'modified_controls': Controls that exist in both but have property changes (e.g. different label, data source, etc).
-- For new forms, all controls should be in 'added_controls'."""
-
-_VIEW_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX view XML and extract TDD documentation for ONLY what was added or changed.
-
-Return ONLY a JSON object in this exact format with no preamble or markdown:
-{
-  "type": "view",
-  "name": "<view name>",
-  "description": "<what this view does. IF items were deleted, mention it here.>",
-  "data_sources": [
-    {
-      "name": "<data source name>",
-      "table": "<underlying table name>"
-    }
-  ],
-  "fields": [
-    {
-      "name": "<field name>",
-      "data_source": "<data source this field comes from>",
-      "edt": "<EDT name if visible, else empty string>"
-    }
-  ],
-  "field_groups": [
-    {
-      "name": "<field group name>",
-      "fields": "<comma-separated field names in this group>"
-    }
-  ],
-  "methods": [
-    {
-      "name": "<method name>",
-      "description": "<what this method does, one sentence>"
-    }
-  ]
-}
-
-Rules:
-- Only include items that were added or modified — not deleted ones.
-- Mention deleted items ONLY in the description field.
-- Omit any array key entirely if nothing was added or changed in that category.
-- Do not return empty arrays."""
+_VIEW_SYSTEM = """D365 AX TDD expert. Analyze AX view XML. Return ONLY JSON for added/changed items, no preamble.
+Schema (omit empty arrays):
+{"type":"view","name":"<name>","description":"<one line; list deletions here>","data_sources":[{"name":"<ds>","table":"<tbl>"}],"fields":[{"name":"<field>","data_source":"<ds>","edt":"<edt or empty>"}],"field_groups":[{"name":"<group>","fields":"<csv>"}],"methods":[{"name":"<m>","description":"<one sentence>"}]}
+Rules: Only added/modified items. Omit empty arrays."""
 
 _SERVICES_SYSTEM = """You are a D365 AX technical documentation expert. Analyze XML and determine if it is a Service Group or a Service.
 
@@ -652,52 +589,10 @@ Rules:
 - Omit the "values" key entirely if no values were added or changed.
 - Do not return empty arrays."""
 
-_DATA_ENTITY_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX Data Entity XML and extract TDD documentation for ONLY what was added or changed.
-
-Return ONLY a JSON object in this exact format with no preamble or markdown:
-{
-  "type": "data_entity",
-  "name": "<entity name from XML>",
-  "description": "<one line description of what this entity exposes. IF items were deleted, mention it here.>",
-  "data_sources": [
-    {
-      "name": "<data source name>",
-      "table": "<underlying table name>",
-      "join_type": "<Root / Inner / Outer / Exists — Root for the primary table>"
-    }
-  ],
-  "fields": [
-    {
-      "name": "<field name>",
-      "data_source": "<data source this field comes from>",
-      "edt": "<EDT name if visible, else empty string>"
-    }
-  ],
-  "entity_keys": [
-    {
-      "name": "<key name>",
-      "fields": "<comma-separated field names in this key>"
-    }
-  ],
-  "field_groups": [
-    {
-      "name": "<field group name>",
-      "fields": "<comma-separated field names in this group>"
-    }
-  ],
-  "methods": [
-    {
-      "name": "<method name>",
-      "description": "<what this method does, one sentence>"
-    }
-  ]
-}
-
-Rules:
-- Only include items that were added or modified — not deleted ones.
-- Mention deleted items ONLY in the description field.
-- Omit any array key entirely if nothing was added or changed in that category.
-- Do not return empty arrays."""
+_DATA_ENTITY_SYSTEM = """D365 AX TDD expert. Analyze AX Data Entity XML. Return ONLY JSON for added/changed items, no preamble.
+Schema (omit empty arrays):
+{"type":"data_entity","name":"<name>","description":"<one line; list deletions here>","data_sources":[{"name":"<ds>","table":"<tbl>","join_type":"<Root|Inner|Outer|Exists>"}],"fields":[{"name":"<field>","data_source":"<ds>","edt":"<edt or empty>"}],"entity_keys":[{"name":"<key>","fields":"<csv>"}],"field_groups":[{"name":"<group>","fields":"<csv>"}],"methods":[{"name":"<m>","description":"<one sentence>"}]}
+Rules: Only added/modified items. Omit empty arrays."""
 
 _REPORT_SYSTEM = """You are a D365 AX technical documentation expert. Analyze AX SSRS report XML and extract TDD documentation for ONLY what was added or changed.
 
@@ -748,6 +643,169 @@ Rules:
 - IF items were deleted, mention it in the description."""
 
 
+# ---------------------------------------------------------------------------
+# Hybrid approach: XML parser extracts structure, LLM writes descriptions only
+# ---------------------------------------------------------------------------
+
+_HYBRID_TYPES = {
+    'class', 'class_extension',
+    'table', 'table_extension',
+    'form', 'form_extension',
+    'view', 'view_extension',
+    'query', 'query_extension',
+    'enum', 'enum_extension',
+    'edt', 'edt_extension',
+    'data_entity', 'data_entity_extension',
+    'security',
+    'services',
+    'menu_item',
+    'menu_extension',
+}
+
+_DESC_ONLY_SYSTEM = """You are a D365 AX technical documentation expert.
+Given a structural summary of a D365 AX object, write concise technical descriptions.
+
+Return ONLY a JSON object with no preamble or markdown:
+{
+  "description": "<one sentence: what does this object do or represent? If items were deleted, mention them.>",
+  "method_descriptions": {
+    "<method_or_operation_name>": "<one sentence: what this method/operation does>"
+  }
+}
+
+Omit "method_descriptions" entirely if no methods or operations are listed in the summary."""
+
+
+def _build_desc_user_msg(object_type: str, object_name: str, parsed: dict, is_new: bool) -> str:
+    base = _EXTENSION_TO_BASE.get(object_type, object_type)
+    change = "new" if is_new else "modified"
+    lines = [f"Object: {object_name} ({base}, {change})"]
+
+    fields = parsed.get('fields', [])
+    if fields:
+        names = [f.get('name', '') or f.get('field_label', '') for f in fields if f.get('name') or f.get('field_label')]
+        if names:
+            lines.append(f"Fields ({len(names)}): {', '.join(names)}")
+
+    ds_list = parsed.get('data_sources', [])
+    if ds_list:
+        lines.append(f"Data sources: {', '.join(d['name'] for d in ds_list if d.get('name'))}")
+
+    controls = parsed.get('added_controls', []) + parsed.get('modified_controls', [])
+    if controls:
+        ctrl_names = [c['name'] for c in controls if c.get('name')]
+        lines.append(f"Controls ({len(ctrl_names)}): {', '.join(ctrl_names)}")
+
+    indexes = parsed.get('indexes', [])
+    if indexes:
+        lines.append(f"Indexes: {', '.join(i['name'] for i in indexes if i.get('name'))}")
+
+    relations = parsed.get('relations', [])
+    if relations:
+        rel_info = [f"{r['name']}→{r.get('related_table','')}" for r in relations if r.get('name')]
+        lines.append(f"Relations: {', '.join(rel_info)}")
+
+    values = parsed.get('values', [])
+    if values:
+        lines.append(f"Enum values: {', '.join(v['name'] for v in values if v.get('name'))}")
+
+    if parsed.get('data_type'):
+        lines.append(f"Data type: {parsed['data_type']}")
+    if parsed.get('extends'):
+        lines.append(f"Extends: {parsed['extends']}")
+
+    keys = parsed.get('entity_keys', [])
+    if keys:
+        lines.append(f"Entity keys: {', '.join(k['name'] for k in keys if k.get('name'))}")
+
+    perms = parsed.get('permissions', [])
+    if perms:
+        perm_str = [f"{p['object_name']}({p.get('access_level','')})" for p in perms if p.get('object_name')]
+        lines.append(f"Permissions: {', '.join(perm_str)}")
+
+    # Menu item fields
+    obj_type_ref = parsed.get('object_type')
+    obj_name_ref = parsed.get('object_name_ref')
+    mi_label = parsed.get('label')
+    if obj_type_ref:
+        lines.append(f"Object Type: {obj_type_ref}")
+    if obj_name_ref:
+        lines.append(f"Object: {obj_name_ref}")
+    if mi_label:
+        lines.append(f"Label: {mi_label}")
+
+    # Menu extension items
+    ext_items = parsed.get('items', [])
+    if ext_items:
+        item_names = [i.get('menu_item_name', '') for i in ext_items if i.get('menu_item_name')]
+        lines.append(f"Menu items added: {', '.join(item_names)}")
+
+    method_names = parsed.get('method_names', [])
+    if method_names:
+        lines.append(f"Methods/operations: {', '.join(method_names)}")
+
+    deleted = parsed.get('deleted', [])
+    if deleted:
+        lines.append(f"DELETED in this change: {', '.join(deleted)}")
+
+    lines.append('')
+    lines.append("Write a 1-sentence description of what this object does.")
+    if deleted:
+        lines.append("The description MUST mention the deleted items by name.")
+    if method_names:
+        lines.append("Also write a 1-sentence description for each method/operation listed.")
+
+    return '\n'.join(lines)
+
+
+def _build_desc_messages(object_type: str, object_name: str, parsed: dict, is_new: bool) -> list:
+    return [
+        {"role": "system", "content": _DESC_ONLY_SYSTEM},
+        {"role": "user", "content": _build_desc_user_msg(object_type, object_name, parsed, is_new)},
+    ]
+
+
+def _merge_parsed_and_llm(object_type: str, object_name: str, parsed: dict, llm_result: dict, is_new: bool) -> dict:
+    base = _EXTENSION_TO_BASE.get(object_type, object_type)
+    result = {
+        'type': object_type,
+        'name': object_name,
+        'description': llm_result.get('description', ''),
+    }
+    
+    # Preserve subtype if present (important for security objects)
+    if 'subtype' in parsed:
+        result['subtype'] = parsed['subtype']
+    elif 'subtype' in llm_result:
+        result['subtype'] = llm_result['subtype']
+
+    method_descs = llm_result.get('method_descriptions', {})
+
+    for key in ('fields', 'field_groups', 'indexes', 'relations', 'data_sources',
+                'added_controls', 'modified_controls', 'values', 'entity_keys',
+                'permissions', 'properties', 'data_type', 'extends',
+                'object_type', 'object_name_ref', 'label', 'items'):
+        if key in parsed:
+            result[key] = parsed[key]
+
+    method_names = parsed.get('method_names', [])
+
+    if base == 'services':
+        details = parsed.get('details', [])
+        if details:
+            result['details'] = [
+                {'name': d['name'], 'description': method_descs.get(d['name'], '')}
+                for d in details
+            ]
+    elif method_names:
+        result['methods'] = [
+            {'name': m, 'description': method_descs.get(m, ''), 'is_new': is_new}
+            for m in method_names
+        ]
+
+    return result
+
+
 _EXTENSION_TO_BASE = {
     'table_extension': 'table',
     'form_extension': 'form',
@@ -756,6 +814,7 @@ _EXTENSION_TO_BASE = {
     'query_extension': 'query',
     'enum_extension': 'enum',
     'class_extension': 'class',
+    'data_entity_extension': 'data_entity',
 }
 
 
@@ -884,4 +943,4 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, use_reloader=False, threaded=True)
