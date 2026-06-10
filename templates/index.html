@@ -43,6 +43,10 @@
   }
   .btn-generate:hover { background: #3a7df6; transform: translateY(-1px); }
   .btn-generate:disabled { background: var(--text3); cursor: not-allowed; transform: none; }
+  .token-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; font-family: var(--mono); font-size: 11px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+  .token-badge b { color: var(--text); }
+  .btn-reset-tokens { background: none; border: none; color: var(--text3); font-size: 10px; cursor: pointer; padding: 2px 4px; transition: color 0.15s; }
+  .btn-reset-tokens:hover { color: var(--danger); }
 
   /* Main layout */
   .main { display: flex; flex: 1; overflow: hidden; }
@@ -293,6 +297,10 @@
 
 <div class="topbar">
   <div class="topbar-logo">TDD<span>agent</span> // D365</div>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <div class="token-badge">Tokens: <b id="tokenTotal">0</b> &nbsp;|&nbsp; in:<b id="tokenPrompt">0</b> out:<b id="tokenCompletion">0</b></div>
+    <button class="btn-reset-tokens" onclick="resetTokens()" title="Reset counter">&#8635;</button>
+  </div>
   <button class="btn-generate" id="btnGenerate" onclick="generateDoc()" disabled>⬇ Generate Word Doc</button>
 </div>
 
@@ -503,6 +511,22 @@
   let objects = [];
   let wiFetchTimer = null;
 
+  function fmt(n){ return Number(n||0).toLocaleString(); }
+  async function refreshTokenUsage(){
+    try{
+      const d = await (await fetch('/token-usage')).json();
+      document.getElementById('tokenTotal').textContent = fmt(d.total);
+      document.getElementById('tokenPrompt').textContent = fmt(d.prompt);
+      document.getElementById('tokenCompletion').textContent = fmt(d.completion);
+    }catch(e){}
+  }
+  async function resetTokens(){
+    await fetch('/reset-token-usage',{method:'POST'});
+    refreshTokenUsage();
+  }
+  setInterval(refreshTokenUsage, 5000);
+  refreshTokenUsage();
+
   function onNewToggle() {
     const isNew = document.getElementById('isNew').checked;
     const wrap = document.getElementById('codeWrap');
@@ -596,6 +620,7 @@
       const csCount = (data.changesets || []).length;
       const failed = data.failed_objects || [];
 
+      refreshTokenUsage();
       showToast('✓ Work Item ' + data.workItemId + ' analyzed — ' + objects.length + ' object(s) across ' + csCount + ' changeset(s).' + (failed.length ? ' ⚠ ' + failed.length + ' failed (see warning below).' : ''), 'success', 6000);
       document.getElementById('btnGenerate').disabled = objects.length === 0;
 
@@ -662,6 +687,7 @@
       renderObjectList();
       updatePreview();
       
+      refreshTokenUsage();
       showToast('✓ Changeset ' + data.changesetId + ' analyzed. ' + objects.length + ' objects found.');
       document.getElementById('btnGenerate').disabled = objects.length === 0;
     } catch(e) {
@@ -707,6 +733,7 @@
       document.getElementById('objectName').value = '';
       document.getElementById('newCode').value = '';
       if (document.getElementById('oldCode')) document.getElementById('oldCode').value = '';
+      refreshTokenUsage();
       showToast('✓ ' + data.name + ' added to document');
       document.getElementById('btnGenerate').disabled = false;
     } catch(e) {
@@ -981,9 +1008,11 @@
     const views = objects.filter(o => o.type === 'view' || o.type === 'view_extension');
     const queries = objects.filter(o => o.type === 'query' || o.type === 'query_extension');
     const enums = objects.filter(o => o.type === 'enum' || o.type === 'enum_extension');
-    const dataEntities = objects.filter(o => o.type === 'data_entity');
+    const dataEntities = objects.filter(o => o.type === 'data_entity' || o.type === 'data_entity_extension');
     const allServices = objects.filter(o => o.type === 'services');
     const securityObjects = objects.filter(o => o.type === 'security');
+    const menuItems = objects.filter(o => o.type === 'menu_item');
+    const menuExtensions = objects.filter(o => o.type === 'menu_extension');
 
     let html = renderDocHeader(h);
     const type = h.work_item_type || 'Enhancement';
@@ -1162,22 +1191,49 @@
       html += '<div class="word-h1">5.&nbsp; Data Dictionary</div><div class="word-h2">Tables</div><div class="word-p" style="color:#aaa;font-style:italic">No tables added yet</div>';
     }
 
-    if (classes.length > 0) {
+    if (classes.length > 0 || menuItems.length > 0 || menuExtensions.length > 0) {
       html += '<div class="word-h1">6.&nbsp; Application Components</div>';
       html += '<div class="word-p">Following AX Classes/Menus/Action Menu Items created to handle the requirement.</div>';
-      html += '<div class="word-h2">Classes</div>';
-      classes.forEach(c => {
-        html += '<div class="word-h3">' + c.name + '</div>';
-        if (c.methods && c.methods.length) {
-          html += '<table class="word-table"><tr><th>Method</th><th>Description</th></tr>';
-          c.methods.forEach(m => {
-            let desc = m.description || '';
-            if (m.is_new && !desc.toLowerCase().startsWith('added')) desc = 'Added ' + desc;
-            html += '<tr><td>' + (m.name||'') + '</td><td>' + desc + '</td></tr>';
-          });
-          html += '</table>';
-        }
-      });
+      
+      if (classes.length > 0) {
+        html += '<div class="word-h2">Classes</div>';
+        classes.forEach(c => {
+          html += '<div class="word-h3">' + esc(c.name) + '</div>';
+          if (c.methods && c.methods.length) {
+            html += '<table class="word-table"><tr><th>Method</th><th>Description</th></tr>';
+            c.methods.forEach(m => {
+              let desc = m.description || '';
+              if (m.is_new && !desc.toLowerCase().startsWith('added')) desc = 'Added ' + desc;
+              html += '<tr><td>' + esc(m.name||'') + '</td><td>' + esc(desc) + '</td></tr>';
+            });
+            html += '</table>';
+          }
+        });
+      }
+
+      if (menuItems.length > 0) {
+        html += '<div class="word-h2">Action Menu Items</div>';
+        html += '<table class="word-ax-table"><tr><th>Menu Item Name</th><th>Object Type</th><th>Object Name</th></tr>';
+        menuItems.forEach(mi => {
+          html += '<tr><td>' + esc(mi.name||'') + '</td><td>' + esc(mi.object_type||'') + '</td><td>' + esc(mi.object_name_ref||'') + '</td></tr>';
+        });
+        html += '</table>';
+      }
+
+      if (menuExtensions.length > 0) {
+        html += '<div class="word-h2">Menu Extensions</div>';
+        menuExtensions.forEach(me => {
+          html += '<div class="word-h3">' + esc(me.name||'Menu Extension') + '</div>';
+          if (me.description) html += '<div class="word-p"><span class="word-bold">Description:</span> ' + esc(me.description) + '</div>';
+          if (me.items && me.items.length) {
+            html += '<div class="word-p word-bold" style="margin-top:8px">Menu Items Added:</div>';
+            html += '<table class="word-ax-table"><tr><th>Parent</th><th>Menu Item Name</th></tr>';
+            me.items.forEach(i => html += '<tr><td>' + esc(i.parent||'') + '</td><td>' + esc(i.menu_item_name||'') + '</td></tr>');
+            html += '</table>';
+          }
+        });
+      }
+
     } else {
       html += '<div class="word-h1">6.&nbsp; Application Components</div><div class="word-h2">Classes</div><div class="word-p" style="color:#aaa;font-style:italic">No classes added yet</div>';
     }
