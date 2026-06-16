@@ -914,7 +914,7 @@ def build_messages(object_type, is_new, old_code, new_code, object_name, diff_mo
         code = new_code if is_new else old_code if diff_mode else f"{old_code}\n{new_code}"
         user = f"Object Name: {object_name}\nChange Type: {change_label}\n\n{code}"
 
-    elif object_type == 'data_entity':
+    elif effective_type == 'data_entity':
         system = _DATA_ENTITY_SYSTEM
         if is_new:
             user = f"Object Name: {object_name}\nObject Type: Data Entity\nChange Type: new entity\n\n{new_code}"

@@ -37,6 +37,19 @@ def set_cell_borders(cell, color="CCCCCC"):
     tcPr.append(tcBorders)
 
 
+def set_cell_padding(cell, top=80, bottom=80, left=108, right=108):
+    """Add inner cell padding (twips: 1 twip ≈ 0.018 mm; 80 twips ≈ 1.4 mm)."""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for side, val in (('top', top), ('bottom', bottom), ('left', left), ('right', right)):
+        m = OxmlElement(f'w:{side}')
+        m.set(qn('w:w'), str(val))
+        m.set(qn('w:type'), 'dxa')
+        tcMar.append(m)
+    tcPr.append(tcMar)
+
+
 def _style_run(run, size=10, bold=False, color_rgb=None, font_name='Hitachi Sans'):
     run.font.name = font_name
     run.font.size = Pt(size)
@@ -58,6 +71,7 @@ def add_header_row(table, headers, bg_color="BDD7EE"):
         cell.text = header
         set_cell_bg(cell, bg_color)
         set_cell_borders(cell)
+        set_cell_padding(cell)
         for para in cell.paragraphs:
             for run in para.runs:
                 _style_run(run, bold=True)
@@ -69,6 +83,7 @@ def add_data_row(table, values, border_color="CCCCCC"):
         cell = row.cells[i]
         cell.text = str(val) if val else ''
         set_cell_borders(cell, border_color)
+        set_cell_padding(cell)
         for para in cell.paragraphs:
             for run in para.runs:
                 _style_run(run)
@@ -90,6 +105,7 @@ def add_ax_subsection_table(doc, heading, headers, rows):
         cell.text = header
         set_cell_bg(cell, 'BDD7EE')
         set_cell_borders(cell, '000000')
+        set_cell_padding(cell)
         for para in cell.paragraphs:
             for r in para.runs:
                 _style_run(r, bold=True)
@@ -262,6 +278,7 @@ def add_cover_black_table(doc, headers, data_rows, revision_data_row=False):
         cell.text = header_text
         set_cell_bg(cell, '000000')
         set_cell_borders(cell, '000000')
+        set_cell_padding(cell)
         _style_cell_text(cell, size=11, bold=True, color_rgb=RGBColor(0xFF, 0xFF, 0xFF))
 
     for row_idx, row_values in enumerate(data_rows):
@@ -272,6 +289,7 @@ def add_cover_black_table(doc, headers, data_rows, revision_data_row=False):
             cell.text = str(value) if value else ''
             set_cell_bg(cell, fill)
             set_cell_borders(cell, '000000')
+            set_cell_padding(cell)
             _style_cell_text(cell, size=11, bold=False, color_rgb=RGBColor(0, 0, 0))
 
     spacer = doc.add_paragraph()
@@ -435,11 +453,14 @@ def generate_tdd_docx(header, objects):
         'class': 'Class', 'table': 'Table', 'form': 'Form', 'edt': 'EDT',
         'view': 'View', 'security': 'Security', 'services': 'Services',
         'enum': 'Enum', 'data_entity': 'Data Entity',
+        'data_entity_extension': 'Data Entity Extension',
         'table_extension': 'Table Extension', 'class_extension': 'Class Extension',
         'form_extension': 'Form Extension', 'view_extension': 'View Extension',
         'edt_extension': 'EDT Extension', 'query_extension': 'Query Extension',
         'enum_extension': 'Enum Extension',
         'report': 'Report',
+        'menu_item': 'Menu Item',
+        'menu_extension': 'Menu Extension',
     }
     from collections import defaultdict
     grouped = defaultdict(list)
@@ -531,7 +552,7 @@ def generate_tdd_docx(header, objects):
     views = [o for o in objects if o['type'] in ('view', 'view_extension')]
     edts = [o for o in objects if o['type'] in ('edt', 'edt_extension')]
     enums = [o for o in objects if o['type'] in ('enum', 'enum_extension')]
-    data_entities = [o for o in objects if o['type'] == 'data_entity']
+    data_entities = [o for o in objects if o['type'] in ('data_entity', 'data_entity_extension')]
     queries = [o for o in objects if o['type'] in ('query', 'query_extension')]
 
     if tables or views or edts or enums or data_entities or queries:
@@ -694,13 +715,17 @@ def generate_tdd_docx(header, objects):
 
     # ── SECTION 6: Application Components ──
     classes = [o for o in objects if o['type'] in ('class', 'class_extension')]
-    if classes:
+    menu_items = [o for o in objects if o['type'] == 'menu_item']
+    menu_extensions = [o for o in objects if o['type'] == 'menu_extension']
+
+    if classes or menu_items or menu_extensions:
         add_section_heading(doc, '6.  Application Components', 1)
         p = doc.add_paragraph()
         run = p.add_run('Following AX Classes/Menus/Action Menu Items created to handle the requirement.')
         _style_run(run)
-        add_section_heading(doc, 'Classes', 2)
 
+    if classes:
+        add_section_heading(doc, 'Classes', 2)
         for cls in classes:
             add_hyperlink_heading(doc, cls['name'])
             methods = cls.get('methods', [])
@@ -714,6 +739,35 @@ def generate_tdd_docx(header, objects):
                         desc = 'Added ' + desc if not desc.lower().startswith('added') else desc
                     add_data_row(m_table, [m.get('name', ''), desc])
                 doc.add_paragraph()
+
+    if menu_items:
+        add_section_heading(doc, 'Action Menu Items', 2)
+        mi_table = doc.add_table(rows=1, cols=3)
+        mi_table.style = 'Table Grid'
+        add_header_row(mi_table, ['Menu Item Name', 'Object Type', 'Object Name'])
+        for mi in menu_items:
+            add_data_row(mi_table, [
+                mi.get('name', ''),
+                mi.get('object_type', ''),
+                mi.get('object_name_ref', ''),
+            ])
+        doc.add_paragraph()
+
+    if menu_extensions:
+        add_section_heading(doc, 'Menu Extensions', 2)
+        for me in menu_extensions:
+            add_hyperlink_heading(doc, me.get('name', 'Menu Extension'))
+            if me.get('description'):
+                add_bold_label(doc, 'Description:', me['description'])
+            items = me.get('items') or []
+            if items:
+                add_ax_subsection_table(
+                    doc,
+                    'Menu Items Added:',
+                    ['Parent', 'Menu Item Name'],
+                    [[i.get('parent', ''), i.get('menu_item_name', '')] for i in items],
+                )
+            doc.add_paragraph()
 
     # ── SECTION 7: Services ──
     services_all = [o for o in objects if o['type'] == 'services']
@@ -776,13 +830,14 @@ def generate_tdd_docx(header, objects):
         for s in security_objects:
             add_hyperlink_heading(doc, f"{s.get('name', 'Security Object')} ({s.get('subtype', '')})")
             add_bold_label(doc, 'Description:', s.get('description', ''))
-            
-            if s.get('subtype') == 'privilege' and s.get('permissions'):
+
+            permissions = s.get('permissions') or []
+            if permissions:
                 p_table = doc.add_table(rows=1, cols=2)
                 p_table.style = 'Table Grid'
                 add_header_row(p_table, ['Object Name', 'Access Level'])
-                for p in s.get('permissions', []):
-                    add_data_row(p_table, [p.get('object_name', ''), p.get('access_level', '')])
+                for perm in permissions:
+                    add_data_row(p_table, [perm.get('object_name', ''), perm.get('access_level', '')])
                 doc.add_paragraph()
     else:
         p = doc.add_paragraph()
